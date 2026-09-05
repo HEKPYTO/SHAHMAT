@@ -43,8 +43,8 @@ x86-64 and Graviton numbers are unmeasured — the Dockerfile tunes per arch
   perft, TT, PGN. Zero-alloc hot paths, pinned by integration tests.
 - `examples/` — perft gate harness (bulk default, `--no-bulk`, `--divide`).
 - `tests/` — TT/hash and zero-alloc integration tests.
-- `Dockerfile`, `compose.yaml` — distroless nonroot image, health-checked
-  compose service capped at 4 CPUs / 1 GiB.
+- `Dockerfile`, `compose.yaml` — Alpine static-musl image (nonroot 65532),
+  health-checked compose service capped at 4 CPUs / 1 GiB.
 - `.github/` — CI gate (fmt, clippy, tests, exact d6, image smoke + size cap).
 
 ## License
