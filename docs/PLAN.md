@@ -9,7 +9,7 @@ Global: each phase's exit lists its own gates. Phases shipping images also end w
 Goal: buildable crate + image. Only missing files are created; `Dockerfile`, `compose.yaml`, `.dockerignore`, `docs/` already exist — verify, do not recreate.
 - Create `Cargo.toml` (crate `shahmat`, explicit `[[bin]] name = "shahmat-svc"`, `[profile.release] opt-level=3, lto="fat", codegen-units=1, strip="debuginfo"` verbatim) + commit `Cargo.lock`.
 - Create `src/lib.rs`, `src/main.rs` (`--health-check` exit 0 + perft args), module stubs (`board.rs`, `attacks.rs`, `movegen.rs`, `fen.rs`, `perft.rs`), `examples/perft.rs` (bulk default, `--no-bulk`, `--divide`).
-- Create first per-dir `README.md` (root, `src/`, `examples/`, `docs/`, `outputs/`) + `LICENSE` (MIT).
+- Create first per-dir `README.md` (root, `src/`, `examples/`, `docs/`, `outputs/`) + `LICENSE-MIT` + `LICENSE-APACHE` (dual: MIT OR Apache-2.0).
 - Unknown arch (`not(aarch64, x86_64, wasm32)`) is `compile_error` naming supported targets; never silent fallback.
 - Exit: `cargo build --release` + `docker build .` green. Compose green is not claimed before this.
 
@@ -47,7 +47,7 @@ Goal: search-ready hashing with no adjudication; search itself stays a non-goal 
 
 Goal: operable release.
 - Observability: `--health-check`, structured logs, `RUST_LOG`, resource limits, restart policy, log rotation (`/health` HTTP 200 only if a server is added here; otherwise CLI semantics stand).
-- Supply chain: digest pins recorded, SBOM reviewed, `cargo audit`/`deny` (added here only), license check (MIT).
+- Supply chain: digest pins recorded, SBOM reviewed, `cargo audit`/`deny` (added here only), license check (MIT OR Apache-2.0).
 - Perf: bench matrix on startpos d6 bulk-ON + bulk-OFF (x86-64 5950X-class, ARM M2 + Graviton, WASM node via wasmtime + `.wasm` bytes for default and `min-mem`); PGO only if a gated bulk-ON bar misses by >10% on two consecutive pinned runs; `criterion` only if two runs differ by >5% and sampling must arbitrate.
 - Exit: release checklist (the Phase-5 boxes above) signed; `ghcr.io/<org>/shahmat-svc:<sha>` deployable via compose (push only on explicit approval); rollback = previous digest.
 

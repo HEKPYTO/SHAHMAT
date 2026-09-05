@@ -1,4 +1,8 @@
-#[cfg(not(any(target_arch = "aarch64", target_arch = "x86_64", target_arch = "wasm32")))]
+#[cfg(not(any(
+    target_arch = "aarch64",
+    target_arch = "x86_64",
+    target_arch = "wasm32"
+)))]
 compile_error!("shahmat supports only aarch64, x86_64, wasm32");
 
 #[cfg(all(feature = "pext", not(target_arch = "x86_64")))]

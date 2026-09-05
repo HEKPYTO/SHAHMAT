@@ -19,7 +19,7 @@ No search/Elo, no NNUE/eval, no UCI server, no GUI, no Elixir NIF in v1. No FIDE
 ```text
 Cargo.toml            # [[bin]] name = "shahmat-svc"; [profile.release] per §2
 Cargo.lock            # committed (Phase 0)
-LICENSE               # MIT (Phase 0)
+LICENSE-MIT + LICENSE-APACHE # MIT OR Apache-2.0, dual (Phase 0)
 src/lib.rs            # dispatch + re-exports
 src/board.rs          # Board 88B + StateInfo (no hash, no PackedBoard in v1)
 src/attacks.rs        # 3 arms: aarch64 hq_rbit / wasm32 black_magic / x86_64 pext-or-magic; owns CPUID table
@@ -50,13 +50,15 @@ Deferred with triggers: `shahmat_nif` (Elixir caller exists); `no_std` split (em
 
 ## 5. Correctness gates (perft table + movegen-legality edges E1-E9)
 
-Perft (leaf-only; 50/75/repetition/insufficient do not exist in this lib): startpos 20/400/8902/197281/4865609/119060324/3195901860; Kiwipete 48/2039/97862/4085603/193690690/8031647685 (d5 double-check 2637-vs-2645 pinned); P3 d6 11030083; P4 d5 15833292 (+mirror); P5 d5 89941194 (Edwards correction); P6 d5 164075551; EP-extra d3 23509; sub-counts + divide; suites: CPW Perft_Results + vajolet perft.txt (perft-random.epd deferred to post-v1 per ponytail).
+Perft (leaf-only; 50/75/repetition/insufficient do not exist in this lib): startpos 20/400/8902/197281/4865609/119060324/3195901860; Kiwipete 48/2039/97862/4085603/193690690/8031647685 (d5 double-check 2637-vs-2645 pinned); P3 d6 11030083; P4 d5 15833292 (+mirror); P5 d5 89941194 (Edwards correction); P6 d5 164075551; EP-extra d3 23509 [FEN-TBD — count kept, FEN unsourced, gate NOT runnable until a sourced FEN lands]; sub-counts + divide; suites: CPW Perft_Results + vajolet perft.txt (perft-random.epd deferred to post-v1 per ponytail).
 
-Movegen-legality edges E1-E9 (FIDECarry table, adjudication edges E10-E20 deleted with the no-rules goal): E1 EP-pin illegal `8/6bb/8/8/R1pP2k1/4P3/P7/K7 b - d3`; E2 EP legal + 23509; E3-E5 castling (Kiwipete/P4/mirror, b-file rule); E6-E7 promo (P5/P4); E8 mate; E9 stalemate. E1-E9 run in Phase 2 movegen tests; there is no `tests/fide.rs`.
+Movegen-legality edges E1-E9 (FIDECarry table, adjudication edges E10-E20 deleted with the no-rules goal): E1 EP-pin illegal `8/6bb/8/8/R1pP2k1/4P3/P7/K7 b - d3`; E2 EP legal (presence-tested; exact-count FEN TBD, see perft line); E3-E5 castling (Kiwipete/P4/mirror, b-file rule); E6-E7 promo (P5/P4); E8 mate; E9 stalemate. E1-E9 run in Phase 2 movegen tests; there is no `tests/fide.rs`.
 
 v1 code implements movegen + perft + FEN subset. No adjudication layer lands in any phase. Perft gates run from v1 so nothing regresses.
 
 ## 6. Performance gates (per platform, single-thread, TT-off unless noted, bulk + full labeled)
+
+Measurement protocol (every reported number): median of 5+ runs with 1 warmup excluded, single-thread, never timed with `--divide`; each report records machine (model/cores/OS), rustc version, RUSTFLAGS, profile, and exact command line. Bars gate only on matching-config runs.
 
 - x86-64 bulk-ON (single-thread, TT-off, bulk depth==1, startpos d6) >= 300M on 5950X-class via `cargo run --release --example perft -- startpos 6` (no `--divide`).
 - ARM64 bulk-ON (same config/position/command) >= 100M win on M2 [PROVISIONAL — re-measure same-machine vs Disservin/cozy at depth==1 before gating releases]; >= 200M adjacent (Graviton-class) recorded, not gating.
