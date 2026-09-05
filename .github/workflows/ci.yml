@@ -1,4 +1,4 @@
-# SHAHMAT CI — Phase 3 trusted gates (docs/PLAN.md Phase 3, docs/SPEC.md section 7).
+# SHAHMAT CI — Phase 3 trusted gates.
 #
 # gate: native single-arch build+test+perft+image smoke, runs on PRs and tags.
 # release: amd64+arm64 buildx push to GHCR on `v*` tags only, after gate.

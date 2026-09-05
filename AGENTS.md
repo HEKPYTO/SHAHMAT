@@ -1,6 +1,6 @@
 # AGENTS.md — SHAHMAT
 
-Scope: every change in this repo. Source of truth for how to work; `docs/SPEC.md` is source of truth for what to build, `docs/PLAN.md` for sequence and gates.
+Scope: every change in this repo. Source of truth for how to work.
 
 ## Engineering principles
 
@@ -21,13 +21,13 @@ Scope: every change in this repo. Source of truth for how to work; `docs/SPEC.md
 ## Privacy — private repo
 
 - Local-only by default: no `push`, no `--push`, no registry publish (`cargo publish`, image push), no remote mention (URLs, `ghcr.io/<org>`, remotes) unless the user explicitly asks in this conversation.
-- `docs/PLAN.md` push commands are gated triggers for a future release step, not standing permission.
+- Documented push/deploy commands are gated triggers for a future release step, not standing permission.
 - No git init / remote add / network publish as a side effect of a build, scaffold, or verification step.
 
 ## Docs — README per subdirectory
 
-- Code-adjacent docs live as `README.md` beside the code they describe (root, each `src/` module dir, `examples/`, `docs/`, `outputs/`). Update the affected `README.md` on every change that touches its directory.
-- No new central docs folder or top-level markdown beyond what exists (`docs/SPEC.md`, `docs/PLAN.md`, per-dir `README.md`) unless explicitly requested.
+- Code-adjacent docs live as `README.md` beside the code they describe (root, each `src/` module dir, `examples/`, `outputs/`). Update the affected `README.md` on every change that touches its directory.
+- No new central docs folder or top-level markdown beyond per-dir `README.md` unless explicitly requested.
 - Only `README.md`, `LICENSE`, and in advanced cases `CHANGELOG.md` may be committed as markdown files. No other `.md` files.
 - Never mention generation tooling or provenance in docs or replies.
 
