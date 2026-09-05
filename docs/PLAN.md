@@ -9,7 +9,7 @@ Global: each phase's exit lists its own gates. Phases shipping images also end w
 Goal: buildable crate + image. Only missing files are created; `Dockerfile`, `compose.yaml`, `.dockerignore`, `docs/` already exist — verify, do not recreate.
 - Create `Cargo.toml` (crate `shahmat`, explicit `[[bin]] name = "shahmat-svc"`, `[profile.release] opt-level=3, lto="fat", codegen-units=1, strip="debuginfo"` verbatim) + commit `Cargo.lock`.
 - Create `src/lib.rs`, `src/main.rs` (`--health-check` exit 0 + perft args), module stubs (`board.rs`, `attacks.rs`, `movegen.rs`, `fen.rs`, `perft.rs`), `examples/perft.rs` (bulk default, `--no-bulk`, `--divide`).
-- Create first per-dir `README.md` (root, `src/`, `examples/`, `docs/`, `outputs/`) + `LICENSE-MIT` + `LICENSE-APACHE` (dual: MIT OR Apache-2.0).
+- Create first per-dir `README.md` (root, `src/`, `examples/`, `docs/`, `outputs/`) + `LICENSE` (Apache-2.0 only).
 - Unknown arch (`not(aarch64, x86_64, wasm32)`) is `compile_error` naming supported targets; never silent fallback.
 - Exit: `cargo build --release` + `docker build .` green. Compose green is not claimed before this.
 
@@ -47,7 +47,7 @@ Goal: search-ready hashing with no adjudication; search itself stays a non-goal 
 
 Goal: operable release.
 - Observability: `--health-check`, structured logs, `RUST_LOG`, resource limits, restart policy, log rotation (`/health` HTTP 200 only if a server is added here; otherwise CLI semantics stand).
-- Supply chain: digest pins recorded, SBOM reviewed, `cargo audit` clean (exit 0, zero deps; `cargo deny` not installed — recorded limitation), license check (MIT OR Apache-2.0).
+- Supply chain: digest pins recorded, SBOM reviewed, `cargo audit` clean (exit 0, zero deps; `cargo deny` not installed — recorded limitation), license check (Apache-2.0 only).
 - Perf (measured 2026-09-05, M2 arm64, rustc 1.98.0, protocol §6: medians, warmup excluded): bulk-ON d6 171.7M (bar ≥100M provisional — PASS), bulk-OFF d6 60.4M (bar ≥40M — PASS), TT d5 1.30x vs full-make 59.6M (bar ≥1.2x cold — PASS), Kiwipete d5 171.4M reference; x86-64/Graviton/WASM NOT-MEASURED (no hosts; Rosetta rejected as invalid). Optimization loop (autoresearch 25-iter + deep-research brief, outputs/movegen-speed-brief.md): 41.4M → 171.7M (4.13x) via single-pass legal gen (checkers+pin masks once, 97% nodes skip make/unmake) + const leap tables; 10 discards logged in autoresearch/opt-260905-1815/. PGO probe (+45% alone) not wired in — superseded by algorithmic gains; recipe retained for release automation. `criterion` never fired (run spread <5%).
 - Exit: release checklist SIGNED 2026-09-05 (correctness complete: full perft table exact incl. d7/Kiwipete-d6, P3-P6, 62 tests green, fmt/clippy clean, audit clean, image 11.2MB in band, compose settled Exit 0; all perf bars PASS except unmeasured platforms). `ghcr.io/<org>/shahmat-svc:<sha>` deployable via compose (push only on explicit approval); rollback = previous digest.
 

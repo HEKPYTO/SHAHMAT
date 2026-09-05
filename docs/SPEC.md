@@ -19,7 +19,7 @@ No search/Elo, no NNUE/eval, no UCI server, no GUI, no Elixir NIF in v1. No FIDE
 ```text
 Cargo.toml            # [[bin]] name = "shahmat-svc"; [profile.release] per §2
 Cargo.lock            # committed (Phase 0)
-LICENSE-MIT + LICENSE-APACHE # MIT OR Apache-2.0, dual (Phase 0)
+LICENSE               # Apache-2.0 only (Phase 0)
 src/lib.rs            # dispatch + re-exports
 src/board.rs          # Board 88B + StateInfo (no hash, no PackedBoard in v1)
 src/attacks.rs        # 3 arms: aarch64 hq_rbit / wasm32 black_magic / x86_64 pext-or-magic; owns CPUID table
