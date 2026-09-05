@@ -15,6 +15,7 @@ Library: board layout, attack tables, movegen filter, FEN, perft, TT, PGN.
   `perft_tt` + `Tt::new(megabytes)`, `divide`, `move_text`,
   `MAX_DEPTH` 128. WASM export `shahmat_perft_bulk_startpos`.
 - `pgn` — `load_pgn` → `Vec<PgnGame>` (tags + resolved moves), `PgnError`.
+- `api` — `Game` (core subset): FEN/startpos in,
   `push_san`/`push_uci`, SAN + verbose moves, `undo`, mate/stalemate only,
   `to_pgn`/`load_pgn` (`*` result), `get`/`square_color`. No draws, no
   board editing.

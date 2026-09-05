@@ -6,14 +6,26 @@ Movegen-correct chess lib — fastest, least memory on each platform. Apache-2.0
 
 ```sh
 cargo test
-cargo run --release --example perft -- startpos 6
+cargo run --release --bin shahmat-svc -- perft startpos 6
 docker compose up --build
 ```
 
 `cargo test` runs the full suite (debug and release paths are both gated in CI).
-The perft example takes `startpos <depth>` or a FEN plus depth, with
-`--no-bulk` for full make/unmake, `--divide` for the root split, and
-`--tt <MB>` for the transposition-table path. Depth 6 is the bulk gate.
+The `shahmat-svc` binary is the service harness: `--health-check` prints `ok`
+for the container/compose probe, and `perft` takes `startpos <depth>` or a FEN
+plus depth, with `--no-bulk` for full make/unmake, `--divide` for the root
+split, `--tt <MB>` for the transposition-table path, and `--jobs N` to fan
+depth-2 prefixes over N threads (deterministic total; `--jobs 1` is the plain
+path). Depth 6 is the bulk gate.
+
+```sh
+cargo run --release --bin shahmat-svc -- --health-check
+cargo run --release --bin shahmat-svc -- perft startpos 6
+cargo run --release --bin shahmat-svc -- perft startpos 6 --no-bulk
+cargo run --release --bin shahmat-svc -- perft startpos 3 --divide
+cargo run --release --bin shahmat-svc -- perft startpos 5 --tt 16
+cargo run --release --bin shahmat-svc -- perft startpos 6 --jobs 8
+```
 
 ## Correctness
 
@@ -40,8 +52,8 @@ x86-64 and Graviton numbers are unmeasured — the Dockerfile tunes per arch
 ## Layout
 
 - `src/` — lib + svc: board layout, attack tables, movegen filter, FEN,
-  perft, TT, PGN. Zero-alloc hot paths, pinned by integration tests.
-- `examples/` — perft gate harness (bulk default, `--no-bulk`, `--divide`).
+  perft, TT, PGN, plus the `shahmat-svc` service binary (health-check +
+  perft gate: bulk default, `--no-bulk`, `--divide`, `--tt`, `--jobs`).
 - `tests/` — TT/hash and zero-alloc integration tests.
 - `Dockerfile`, `compose.yaml` — Alpine static-musl image (nonroot 65532),
   health-checked compose service capped at 4 CPUs / 1 GiB.

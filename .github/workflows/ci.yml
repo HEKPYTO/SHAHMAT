@@ -58,7 +58,7 @@ jobs:
       - name: perft startpos d6 exact (host)
         run: |
           set -euo pipefail
-          cargo run --locked --release --example perft -- startpos 6 | tee perft-d6.log
+          cargo run --locked --release --bin shahmat-svc -- perft startpos 6 | tee perft-d6.log
           grep -q "nodes: ${PERFT_D6}" perft-d6.log
 
       - name: docker build (local, no push)

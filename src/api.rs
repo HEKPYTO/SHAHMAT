@@ -1,3 +1,4 @@
+//! Usable game API (core subset).
 //!
 //! [`Game`] owns a [`Board`](crate::board::Board) plus the per-ply history
 //! needed for [`Game::undo`], a header map, and the initial FEN. Load a FEN
@@ -6,37 +7,15 @@
 //! ([`Game::moves_san`]/[`Game::moves_verbose`]), and export
 //! ([`Game::fen`]/[`Game::to_pgn`]).
 //!
-//!
-//! |---------------------|---------------------------------------|
-//! | `new Chess()`       | [`Game::new`]/[`Game::default`]       |
-//! | `load(fen)`         | [`Game::load_fen`]/[`Game::from_fen`] |
-//! | `turn()`            | [`Game::turn`] (`'w'`/`'b'`)          |
-//! | `fen()`             | [`Game::fen`]                         |
-//! | `board()`           | [`Game::board_rank8_first`]           |
-//! | `moves()`           | [`Game::moves_san`]                   |
-//! | `moves({verbose})`  | [`Game::moves_verbose`]               |
-//! | `move(san)`         | [`Game::push_san`]                    |
-//! | `move({from,to})`   | [`Game::push_uci`]                    |
-//! | `undo()`            | [`Game::undo`]                        |
-//! | `history()`         | [`Game::history_san`]                 |
-//! | `inCheck()`         | [`Game::in_check`]                    |
-//! | `isCheckmate()`     | [`Game::is_checkmate`]                |
-//! | `isStalemate()`     | [`Game::is_stalemate`]                |
-//! | `isGameOver()`      | [`Game::is_game_over`]                |
-//! | `reset()`           | [`Game::reset`]                       |
-//! | `pgn()`             | [`Game::to_pgn`]                      |
-//! | `loadPgn(pgn)`      | [`Game::load_pgn`]                    |
-//! | `get(sq)`           | [`Game::get`]                         |
-//! | `squareColor(sq)`   | [`Game::square_color`]                |
-//! | headers             | [`Game::get_header`]/[`Game::set_header`] |
-//!
+//! ## Scope (core goal)
 //!
 //! - No draws of any kind: no fifty-move rule, no threefold repetition,
 //!   no insufficient material, no draw claims or offers. [`Game::is_game_over`]
 //!   is checkmate or stalemate only, and [`Game::to_pgn`] always ends `*`.
-//! - No board editing: no `put`/`remove`/`clear`, no loading moves into an
-//!   arbitrary position. Games start from [`STARTPOS`](crate::fen::STARTPOS)
-//!   or a FEN via [`Game::from_fen`]/[`Game::load_fen`] only.
+//! - No board editing: no piece placement, removal, or clearing, no loading
+//!   moves into an arbitrary position. Games start from
+//!   [`STARTPOS`](crate::fen::STARTPOS) or a FEN via [`Game::from_fen`]/
+//!   [`Game::load_fen`] only.
 //! - Move numbering in [`Game::to_pgn`] always starts at 1 (fullmove is not
 //!   stored by FEN render, which always emits `1`).
 
@@ -94,6 +73,7 @@ impl From<PgnError> for GameError {
     }
 }
 
+/// One legal move with verbose fields.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct VerboseMove {
     /// Canonical SAN (with `+`/`#`).
