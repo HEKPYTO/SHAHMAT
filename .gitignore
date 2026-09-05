@@ -3,3 +3,8 @@ autoresearch/
 outputs/
 HANDOFF.md
 docs/
+*.md
+!README.md
+!**/README.md
+!readme.md
+!**/readme.md
