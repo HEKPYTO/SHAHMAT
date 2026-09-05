@@ -88,11 +88,12 @@ fn board_constructs_without_alloc() {
         let b = Board {
             occupancies: [0u64; 9],
             state: [0, 0],
+            hash: 0,
         };
         std::hint::black_box(b);
         std::mem::size_of::<Board>() as u64
     });
-    assert_eq!(bytes, 88, "Board must stay 88B");
+    assert_eq!(bytes, 96, "Board must stay 96B (88B layout + 8B hash)");
     assert_eq!(n, 0, "Board construction must not allocate");
 }
 
