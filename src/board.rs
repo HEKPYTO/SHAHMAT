@@ -33,10 +33,10 @@
 //! | 0                  | Side to move (0 = White, 1 = Black)       |
 //! | 1–4                | Castling rights: bit1 WK, bit2 WQ,        |
 //! |                    | bit3 BK, bit4 BQ (1 = right retained)     |
-//! | 5–10               | En-passant square 0–63, 64 = none         |
-//! |                    | (6 bits; values 65–127 reserved)          |
-//! | 11–24              | Halfmove clock (14 bits, 0–16383)         |
-//! | 25–63              | Reserved, must be zero                    |
+//! | 5–11               | En-passant square 0–63, 64 = none         |
+//! |                    | (7 bits; values 65–127 reserved)          |
+//! | 12–25              | Halfmove clock (14 bits, 0–16383)         |
+//! | 26–63              | Reserved, must be zero                    |
 //!
 //! `state[1]`: reserved, must be zero (keeps the struct at 88 B while
 //! leaving a spare word; it is NOT a hash slot).

@@ -839,13 +839,13 @@ mod tests {
     #[test]
     fn family_model_decode_haswell() {
         // Haswell i7: family 0x06, model 0x3c → EAX 0x0306c0.
-        assert_eq!(decode_family_model(0x0306_c0), (0x06, 0x3c));
+        assert_eq!(decode_family_model(0x0003_06c0), (0x06, 0x3c));
     }
 
     #[test]
     fn family_model_decode_zen3() {
         // Zen3: base family 0x0f + ext 0x0a → 0x19; ext model 2, base 1 → 0x21.
-        assert_eq!(decode_family_model(0xa20f_10), (0x19, 0x21));
+        assert_eq!(decode_family_model(0x00a2_0f10), (0x19, 0x21));
     }
 
     #[test]
