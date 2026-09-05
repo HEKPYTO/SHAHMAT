@@ -23,7 +23,7 @@ jobs:
     name: gate (native single-arch)
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set SOURCE_DATE_EPOCH from commit time
         run: |
@@ -89,7 +89,7 @@ jobs:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       - name: Set SOURCE_DATE_EPOCH from commit time
         run: |
