@@ -6,7 +6,7 @@
 //! `--divide`). Every run prints wall-time and nps.
 
 use shahmat::fen::{parse, STARTPOS};
-use shahmat::perft::{divide, perft, perft_bulk, perft_tt, Tt};
+use shahmat::perft::{divide, perft, perft_bulk, perft_tt, Tt, MAX_DEPTH};
 use std::process::ExitCode;
 use std::time::Instant;
 
@@ -53,8 +53,11 @@ fn main() -> ExitCode {
         _ => return usage(),
     };
     let depth: u32 = match depth_src.parse() {
-        Ok(d) => d,
-        Err(_) => return usage(),
+        Ok(d) if d <= MAX_DEPTH => d,
+        _ => {
+            eprintln!("depth must be 0..={MAX_DEPTH}");
+            return usage();
+        }
     };
     let board = match parse(&fen) {
         Ok(b) => b,

@@ -9,8 +9,7 @@ RUN --mount=type=cache,target=/var/cache/cargo,sharing=locked \
     export CARGO_HOME=/var/cache/cargo; \
     cargo fetch --locked
 COPY src ./src
-RUN --mount=type=cache,target=/usr/local/cargo/registry \
-    --mount=type=cache,target=/app/target \
+RUN --mount=type=cache,target=/app/target \
     --mount=type=cache,target=/var/cache/cargo,sharing=locked \
     export CARGO_HOME=/var/cache/cargo; \
     case "$TARGETARCH" in amd64) EXP_FLAGS="-C target-cpu=x86-64-v3";; arm64) EXP_FLAGS="-C target-cpu=neoverse-n1";; *) echo "unknown TARGETARCH: $TARGETARCH" >&2; exit 1;; esac; \

@@ -113,12 +113,12 @@ jobs:
           provenance: mode=max
           sbom: true
           push: true
-          tags: ${{ env.IMAGE_RELEASE }}:${{ github.ref_name }}
+          tags: ${{ env.IMAGE_RELEASE }}:${{ github.sha }}
 
       - name: record per-arch size (warn >12MB, fail >50MB)
         run: |
           set -euo pipefail
-          TAG="${IMAGE_RELEASE}:${GITHUB_REF_NAME}"
+          TAG="${IMAGE_RELEASE}:${GITHUB_SHA}"
           RAW="$(docker buildx imagetools inspect "$TAG" --raw)"
           FAIL=0
           while read -r ARCH SIZE; do

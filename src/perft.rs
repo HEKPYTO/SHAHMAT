@@ -15,30 +15,34 @@
 //! collects, or formats. TT probe/store index a preallocated table (one
 //! `Vec` at [`Tt`] construction, never grows) — no hot-path allocation.
 //! [`divide`] is the deliberate exception — it returns an owned [`Vec`]
-//! of [`DivideMove`] rows (raw u16 + UCI-ish debug text + sub-count),
-//! since callers print it, never recurse on it.
+//! of [`DivideMove`] rows (debug text + sub-count), since callers print
+//! it, never recurse on it.
 //!
 //! ## TT notes
 //!
 //! Keys are full-recompute [`board_hash`](crate::board::board_hash) values
 //! taken on the live board at each node — never the cached `Board::hash`
 //! field, which goes stale across frozen make/unmake (see `board.rs`).
-//! Perft stores exact counts only ([`TT_EXACT`]); bound flags exist for the
-//! search-ready shape. Replacement is depth-preferred within a bucket.
-//! Existing [`perft`]/[`perft_bulk`]/[`divide`] signatures are untouched
-//! (additive only); TT users call [`perft_tt`].
-//!
-//! Follow-up for the integrator step (NOT done here — `examples/` and
-//! `main.rs` are frozen): wire an optional `--tt <MB>` CLI flag to
-//! `examples/perft.rs` that builds `Tt::new(mb)` and calls `perft_tt`.
+//! Perft stores exact counts only; there are no bound flags, best moves,
+//! or replacement policies beyond first-unused-else-shallowest. The
+//! `--tt <MB>` flag in `examples/perft.rs` wires [`Tt`] to [`perft_tt`].
 
 use crate::board::{board_hash, Board, Move};
 use crate::movegen::{generate_legal, make, unmake, MoveList};
+
+/// Maximum supported depth (stack guard: each level holds a movelist plus
+/// an undo token; tables end far earlier). Public entries assert it;
+/// CLIs reject deeper requests as usage errors.
+pub const MAX_DEPTH: u32 = 128;
 
 /// Full make/unmake perft: leaf count of legal move paths to `depth`.
 /// Depth 0 = 1 (the identity count, no moves generated).
 #[inline(never)]
 pub fn perft(board: &Board, depth: u32) -> u64 {
+    assert!(
+        depth <= MAX_DEPTH,
+        "perft depth {depth} exceeds MAX_DEPTH={MAX_DEPTH}"
+    );
     let mut b = *board;
     full_mut(&mut b, depth)
 }
@@ -47,6 +51,10 @@ pub fn perft(board: &Board, depth: u32) -> u64 {
 /// `moves.len()` without make/unmake at the bulk depth. Depth 0 = 1.
 #[inline(never)]
 pub fn perft_bulk(board: &Board, depth: u32) -> u64 {
+    assert!(
+        depth <= MAX_DEPTH,
+        "perft depth {depth} exceeds MAX_DEPTH={MAX_DEPTH}"
+    );
     let mut b = *board;
     bulk_mut(&mut b, depth)
 }
@@ -57,15 +65,17 @@ pub fn perft_bulk(board: &Board, depth: u32) -> u64 {
 /// repeated runs hit at the root and above.
 #[inline(never)]
 pub fn perft_tt(board: &Board, depth: u32, tt: &mut Tt) -> u64 {
+    assert!(
+        depth <= MAX_DEPTH,
+        "perft depth {depth} exceeds MAX_DEPTH={MAX_DEPTH}"
+    );
     let mut b = *board;
     full_tt(&mut b, depth, tt)
 }
 
-/// One root-move row of [`divide`]: raw move token, UCI-ish debug text
-/// (`e2e4`, promotions suffixed `nbrq`), and the sub-count below it.
+/// One root-move row of [`divide`]: UCI-ish debug text (`e2e4`,
+/// promotions suffixed `nbrq`) and the sub-count below it.
 pub struct DivideMove {
-    /// Raw [`Move`] token bits (layout owned by movegen).
-    pub raw: u16,
     /// Debug text, e.g. `e2e4` / `e7e8q`.
     pub text: String,
     /// Nodes below this root move (`perft` at depth − 1 after making it).
@@ -74,6 +84,10 @@ pub struct DivideMove {
 
 /// Per-root-move counts at `depth`, in fixed generation order (movegen's
 pub fn divide(board: &Board, depth: u32) -> Vec<DivideMove> {
+    assert!(
+        depth <= MAX_DEPTH,
+        "perft depth {depth} exceeds MAX_DEPTH={MAX_DEPTH}"
+    );
     if depth == 0 {
         return Vec::new();
     }
@@ -87,7 +101,6 @@ pub fn divide(board: &Board, depth: u32) -> Vec<DivideMove> {
         let nodes = bulk_mut(&mut b, depth - 1);
         unmake(&mut b, undo, mv);
         rows.push(DivideMove {
-            raw: mv.0,
             text: move_text(mv),
             nodes,
         });
@@ -114,29 +127,19 @@ pub fn move_text(mv: Move) -> String {
 }
 
 // ---------------------------------------------------------------------------
-// Transposition table (bucketed, fixed-size, search-ready shape).
+// Transposition table (bucketed, fixed-size, exact counts only).
 // ---------------------------------------------------------------------------
 
-/// TT flag: exact value (the only flag perft stores).
-pub const TT_EXACT: u8 = 0;
-/// TT flag: lower bound (reserved for search; never stored by perft).
-pub const TT_LOWER: u8 = 1;
-/// TT flag: upper bound (reserved for search; never stored by perft).
-pub const TT_UPPER: u8 = 2;
-
-/// Slots per bucket (depth-preferred replacement within the bucket).
+/// Slots per bucket (first-unused-else-shallowest replacement).
 const TT_BUCKET: usize = 4;
 
-/// One TT slot: full-keyed exact node count plus search-ready metadata.
+/// One TT slot: full key plus the exact node count at `depth`.
 #[derive(Clone, Copy)]
 struct TtSlot {
     key: u64,
     nodes: u64,
     depth: u32,
-    flag: u8,
     used: bool,
-    best: u16,
-    has_best: bool,
 }
 
 impl TtSlot {
@@ -145,10 +148,7 @@ impl TtSlot {
             key: 0,
             nodes: 0,
             depth: 0,
-            flag: TT_EXACT,
             used: false,
-            best: 0,
-            has_best: false,
         }
     }
 }
@@ -157,14 +157,13 @@ impl TtSlot {
 ///
 /// Storage is one preallocated `Vec` of buckets sized from the `megabytes`
 /// constructor param (`0` → one bucket minimum); it never grows, and
-/// probe/store never allocate. Counters (`probes`/`hits`/`stores`) are
-/// plain `u64`s for the hit-rate test hook.
+/// probe/store never allocate. Counters (`probes`/`hits`) are plain `u64`s
+/// for the hit-rate hook used by the `--tt` CLI output and tests.
 pub struct Tt {
     buckets: Vec<[TtSlot; TT_BUCKET]>,
     mask: usize,
     probes: u64,
     hits: u64,
-    stores: u64,
 }
 
 impl Tt {
@@ -187,16 +186,10 @@ impl Tt {
             mask: n - 1,
             probes: 0,
             hits: 0,
-            stores: 0,
         }
     }
 
-    /// Bucket count (power of two, ≥ 1).
-    pub fn num_buckets(&self) -> usize {
-        self.buckets.len()
-    }
-
-    /// Total probe calls since construction (or [`Tt::clear`]).
+    /// Total probe calls since construction.
     pub fn probes(&self) -> u64 {
         self.probes
     }
@@ -204,11 +197,6 @@ impl Tt {
     /// Exact-depth key hits.
     pub fn hits(&self) -> u64 {
         self.hits
-    }
-
-    /// Successful stores.
-    pub fn stores(&self) -> u64 {
-        self.stores
     }
 
     /// `hits / probes` (0.0 when nothing probed).
@@ -220,25 +208,15 @@ impl Tt {
         }
     }
 
-    /// Drop all entries and reset counters; capacity is retained.
-    pub fn clear(&mut self) {
-        for b in self.buckets.iter_mut() {
-            *b = [TtSlot::empty(); TT_BUCKET];
-        }
-        self.probes = 0;
-        self.hits = 0;
-        self.stores = 0;
-    }
-
     /// Exact-hit probe: `Some(nodes)` iff a slot in the key's bucket holds
-    /// `key` with an equal `depth` and [`TT_EXACT`]. No allocation.
+    /// `key` with an equal `depth`. No allocation.
     pub fn probe(&mut self, key: u64, depth: u32) -> Option<u64> {
         self.probes += 1;
         let bucket = &self.buckets[(key as usize) & self.mask];
         let mut i = 0usize;
         while i < TT_BUCKET {
             let s = &bucket[i];
-            if s.used && s.key == key && s.depth == depth && s.flag == TT_EXACT {
+            if s.used && s.key == key && s.depth == depth {
                 self.hits += 1;
                 return Some(s.nodes);
             }
@@ -247,11 +225,9 @@ impl Tt {
         None
     }
 
-    /// Store an exact node count for (`key`, `depth`), with an optional
-    /// best-move token (perft passes `None`; search will pass `Some`).
-    /// Victim: first unused slot, else the shallowest slot
-    /// (depth-preferred replacement). No allocation.
-    pub fn store(&mut self, key: u64, depth: u32, nodes: u64, best: Option<Move>) {
+    /// Store an exact node count for (`key`, `depth`). Victim: first
+    /// unused slot, else the shallowest slot. No allocation.
+    pub fn store(&mut self, key: u64, depth: u32, nodes: u64) {
         let bucket = &mut self.buckets[(key as usize) & self.mask];
         let mut victim = 0usize;
         let mut min_depth = u32::MAX;
@@ -267,35 +243,12 @@ impl Tt {
             }
             i += 1;
         }
-        let (raw, has) = match best {
-            Some(mv) => (mv.0, true),
-            None => (0, false),
-        };
         bucket[victim] = TtSlot {
             key,
             nodes,
             depth,
-            flag: TT_EXACT,
             used: true,
-            best: raw,
-            has_best: has,
         };
-        self.stores += 1;
-    }
-
-    /// Stored best-move token for (`key`, `depth`), if one was saved.
-    /// Probe helper for the search-ready shape (perft never reads it).
-    pub fn stored_best(&mut self, key: u64, depth: u32) -> Option<Move> {
-        let bucket = &self.buckets[(key as usize) & self.mask];
-        let mut i = 0usize;
-        while i < TT_BUCKET {
-            let s = &bucket[i];
-            if s.used && s.key == key && s.depth == depth && s.has_best {
-                return Some(Move(s.best));
-            }
-            i += 1;
-        }
-        None
     }
 }
 
@@ -332,7 +285,7 @@ fn full_tt(b: &mut Board, depth: u32, tt: &mut Tt) -> u64 {
         nodes += full_tt(b, depth - 1, tt);
         unmake(b, undo, mv);
     }
-    tt.store(key, depth, nodes, None);
+    tt.store(key, depth, nodes);
     nodes
 }
 

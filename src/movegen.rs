@@ -62,7 +62,7 @@
 //! make/unmake round-trips are bit-exact (see the round-trip test).
 
 use crate::attacks::{bishop_attacks, queen_attacks, rook_attacks};
-use crate::board::{Board, Move, StateInfo, MOVELIST_CAP};
+use crate::board::{Board, Move, StateInfo, EP_NONE, MOVELIST_CAP};
 
 // Piece indices into `occupancies[0..6]`; 6/7 are colour aggregates, 8 is all.
 const PAWN: usize = 0;
@@ -85,7 +85,6 @@ const EP_SHIFT: u64 = 5;
 const EP_MASK: u64 = 0x7f << EP_SHIFT; // 7 bits @5-11: 0-63 sq, 64 none
 const HM_SHIFT: u64 = 12;
 const HM_MASK: u64 = 0x3fff << HM_SHIFT; // 14 bits @12-25
-const NO_EP: u8 = 64;
 const NO_CAP: u64 = 8;
 
 // ---------------------------------------------------------------------------
@@ -519,7 +518,7 @@ impl<'a> PawnCap<'a> {
             } else {
                 self.list.push(Move::new(from, to, 0, false));
             }
-        } else if to == self.ep && self.ep != NO_EP {
+        } else if to == self.ep && self.ep != EP_NONE {
             // Victim one rank behind `to`; required so a stray EP square on a
             // malformed FEN yields no phantom move.
             let victim = if self.white { to - 8 } else { to + 8 };
@@ -732,6 +731,10 @@ pub fn has_legal(b: &mut Board, white: bool) -> bool {
 
 /// Apply `mv`, returning an undo token. Updates rights/EP/halfmove per the
 /// move type and flips the side to move.
+///
+/// Caller contract: `mv` must be a legal move for `b` (as produced by
+/// [`generate_legal`]). Forged tokens hit the `debug_assert!` below in
+/// debug builds and are logic errors everywhere — there is no `try_make`.
 pub fn make(b: &mut Board, mv: Move) -> StateInfo {
     let from = mv.from();
     let to = mv.to();
@@ -741,6 +744,10 @@ pub fn make(b: &mut Board, mv: Move) -> StateInfo {
     let foe_i = if white { BLACK } else { WHITE };
     let from_bit = 1u64 << from;
     let to_bit = 1u64 << to;
+    debug_assert!(
+        from < 64 && to < 64 && (b.occupancies[own_i] & from_bit) != 0,
+        "make requires a legal move token (mover on `from`); got {from}->{to}"
+    );
 
     // Moved piece: pawn on promotions, else whichever own piece sits on `from`.
     let mut piece = PAWN;
@@ -839,7 +846,7 @@ pub fn make(b: &mut Board, mv: Move) -> StateInfo {
     s0 |= if double {
         (((from + to) / 2) as u64) << EP_SHIFT
     } else {
-        (NO_EP as u64) << EP_SHIFT
+        (EP_NONE as u64) << EP_SHIFT
     };
 
     // Halfmove: reset on pawn move or capture.
