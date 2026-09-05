@@ -4,11 +4,15 @@ WORKDIR /app
 ARG TARGETARCH
 ARG RUSTFLAGS=""
 COPY Cargo.toml Cargo.lock ./
+COPY src ./src
+# NOTE: `src/` copies before `fetch` (not after) because `[lib] crate-type`
+# needs `src/lib.rs` present for manifest resolution on cargo 1.93. Fetch
+# re-runs when sources change, but this zero-dep crate fetches nothing, so
+# no cache is lost.
 RUN --mount=type=cache,target=/var/cache/cargo,sharing=locked \
     --mount=type=cache,target=/app/target \
     export CARGO_HOME=/var/cache/cargo; \
     cargo fetch --locked
-COPY src ./src
 RUN --mount=type=cache,target=/app/target \
     --mount=type=cache,target=/var/cache/cargo,sharing=locked \
     export CARGO_HOME=/var/cache/cargo; \

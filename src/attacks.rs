@@ -342,7 +342,7 @@ fn ray_march(sq: u8, occ: u64, rook: bool) -> u64 {
         let (df, dr) = DIRS[d];
         let mut nf = f + df;
         let mut nr = r + dr;
-        while nf >= 0 && nf < 8 && nr >= 0 && nr < 8 {
+        while (0..8).contains(&nf) && (0..8).contains(&nr) {
             let s = (nr as u64) * 8 + nf as u64;
             att |= 1u64 << s;
             if occ & (1u64 << s) != 0 {
@@ -367,7 +367,7 @@ fn deposit(mut x: u64, mask: u64) -> u64 {
     let mut out = 0u64;
     let mut m = mask;
     while m != 0 {
-        let l = m & m.wrapping_neg();
+        let l = m.isolate_lowest_one();
         if x & 1 != 0 {
             out |= l;
         }
