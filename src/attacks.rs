@@ -367,7 +367,7 @@ fn deposit(mut x: u64, mask: u64) -> u64 {
     let mut out = 0u64;
     let mut m = mask;
     while m != 0 {
-        let l = m.isolate_lowest_one();
+        let l = 1u64 << m.trailing_zeros();
         if x & 1 != 0 {
             out |= l;
         }
