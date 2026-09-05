@@ -3,19 +3,11 @@ services:
   svc:
     build: { context: ., dockerfile: Dockerfile }
     image: ${IMAGE:-shahmat-svc:local}
-    # NOTE: EXPOSE/ports carry no traffic in CLI-only images; reserved for Phase-5 server.
-    ports: ["8080:8080"]
+    # CLI-only v1: run-to-completion (exits 0). Ports, healthcheck, env,
+    # logging caps, and resource limits return with the Phase-5 server.
     user: "65532:65532"
     read_only: true
     tmpfs: [/tmp]
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
-    stop_grace_period: 10s
-    # NOTE: CLI-only v1 is run-to-completion (exits 0); Phase 5 restores unless-stopped with the daemon command.
     restart: "no"
-    # NOTE: IMAGE dropped from container env (dead/misleading); $IMAGE only selects image above.
-    environment: { RUST_LOG: info, PORT: "8080" }
-    healthcheck: { test: ["CMD", "/svc", "--health-check"], interval: 10s, timeout: 2s, retries: 3, start_period: 5s }
-    logging: { driver: json-file, options: { max-size: 10m, max-file: "3" } }
-    deploy:
-      resources: { limits: { cpus: "4", memory: 1G }, reservations: { memory: 256M } }
