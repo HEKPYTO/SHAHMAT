@@ -224,19 +224,35 @@ fn count_prefix_chunk(
     debug_assert!(depth >= 2);
     let mut total = 0u64;
     let (mut probes, mut hits) = (0u64, 0u64);
-    for &(m1, m2) in chunk {
-        let mut child = *board;
-        make(&mut child, m1);
-        make(&mut child, m2);
-        match mode {
-            Mode::Bulk2 => total += perft_bulk(&child, depth - 2),
-            Mode::Full => total += perft(&child, depth - 2),
-            Mode::Tt(mb) => {
-                let mut tt = Tt::new(mb);
-                total += perft_tt(&child, depth - 2, &mut tt);
-                probes += tt.probes();
-                hits += tt.hits();
+    match mode {
+        Mode::Bulk2 => {
+            for &(m1, m2) in chunk {
+                let mut child = *board;
+                make(&mut child, m1);
+                make(&mut child, m2);
+                total += perft_bulk(&child, depth - 2);
             }
+        }
+        Mode::Full => {
+            for &(m1, m2) in chunk {
+                let mut child = *board;
+                make(&mut child, m1);
+                make(&mut child, m2);
+                total += perft(&child, depth - 2);
+            }
+        }
+        Mode::Tt(mb) => {
+            // One table per worker chunk: keys are full-hash+depth, so
+            // sharing across the chunk's prefixes keeps totals exact.
+            let mut tt = Tt::new(mb);
+            for &(m1, m2) in chunk {
+                let mut child = *board;
+                make(&mut child, m1);
+                make(&mut child, m2);
+                total += perft_tt(&child, depth - 2, &mut tt);
+            }
+            probes += tt.probes();
+            hits += tt.hits();
         }
     }
     (total, probes, hits)

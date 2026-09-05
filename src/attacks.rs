@@ -1,4 +1,4 @@
-//! Slider dispatch (SPEC §4, PLAN Phase 1): exactly one resident table set.
+//! Slider dispatch: exactly one resident table set.
 //!
 //! Gate contract (arch × feature matrix; `pext`-misuse rejection lives in
 //! `lib.rs` and is not repeated here):
@@ -69,7 +69,7 @@ pub fn decode_family_model(eax: u32) -> (u32, u32) {
     (family, model)
 }
 
-/// Slow-BMI2 predicate (SPEC §4): vendor-model in `znver1`/`znver2`/`bdver4`.
+/// Slow-BMI2 predicate: vendor-model in `znver1`/`znver2`/`bdver4`.
 ///
 /// Pure over injected values: host-independent.
 /// - AMD family `0x17` (Zen1 `znver1` + Zen2 `znver2`, all models) → slow.
@@ -82,7 +82,7 @@ pub fn bmi2_is_slow(vendor: CpuVendor, family: u32, model: u32) -> bool {
     }
 }
 
-/// Resident slider engine (SPEC §4): exactly one large table set per binary.
+/// Resident slider engine: exactly one large table set per binary.
 ///
 /// Matched ONCE per dispatch site — exhaustively, so a typo can never
 /// silently fall through to a wrong engine the way string codes could.
@@ -99,7 +99,7 @@ pub enum Engine {
     Pext,
     Avx2Hq,
 }
-/// x86_64 path selection (SPEC §4): BMI2 present AND not slow → PEXT, else the
+/// x86_64 path selection: BMI2 present AND not slow → PEXT, else the
 /// single fallback resident (`Avx2Hq` iff AVX2, else `Black`).
 ///
 /// Pure over injected flags: host-independent.

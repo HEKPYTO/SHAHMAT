@@ -36,7 +36,7 @@ jobs:
         with:
           components: rustfmt, clippy
 
-      # Sole cache action in this workflow (SPEC section 7: GHA cache).
+      # Sole cache action in this workflow.
       - uses: Swatinem/rust-cache@v2
 
       - name: fmt

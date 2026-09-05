@@ -97,6 +97,7 @@ fn perft_divide(fen: String, depth: u32) -> NifResult<Result<Vec<(String, u64)>,
 
 /// `legal_moves(fen) -> {:ok, binary} | {:error, reason}`; the binary holds
 /// packed little-endian `u16` move tokens, two bytes per move.
+/// Note: the `allocation_failed` path below is covered Elixir-side (no BEAM VM in Rust tests).
 #[rustler::nif]
 fn legal_moves<'a>(env: Env<'a>, fen: String) -> NifResult<Result<Binary<'a>, String>> {
     let bytes = match legal_moves_packed(&fen) {
@@ -108,17 +109,10 @@ fn legal_moves<'a>(env: Env<'a>, fen: String) -> NifResult<Result<Binary<'a>, St
     Ok(Ok(owned.release(env)))
 }
 
-/// `parse_fen(fen) -> {:ok, canonical_fen} | {:error, reason}`.
+/// `parse_fen(fen) -> {:ok, canonical_fen} | {:error, reason}`: validate,
+/// then render the canonical FEN (stateless surface — no board handles in v1).
 #[rustler::nif]
 fn parse_fen(fen: String) -> NifResult<Result<String, String>> {
-    Ok(fen_valid(&fen))
-}
-
-/// `render_fen(fen) -> {:ok, canonical_fen} | {:error, reason}`.
-/// Stateless surface: same validate-then-canonicalize path as `parse_fen`
-/// (there are no board handles in v1).
-#[rustler::nif]
-fn render_fen(fen: String) -> NifResult<Result<String, String>> {
     Ok(fen_valid(&fen))
 }
 
@@ -166,6 +160,18 @@ mod tests {
         let tokens: Vec<u16> = list.as_slice().iter().map(|mv| mv.0).collect();
 
         assert_eq!(decoded, tokens);
+    }
+
+    #[test]
+    fn empty_legal_move_list_packs_to_zero_bytes() {
+        // Fool's mate: white is checkmated, so no legal moves exist.
+        let mated = "rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 0 1";
+        let bytes = legal_moves_packed(mated).unwrap();
+        assert!(bytes.is_empty());
+        let (pairs, rest) = bytes.as_chunks::<2>();
+        assert!(rest.is_empty());
+        let decoded: Vec<u16> = pairs.iter().map(|pair| u16::from_le_bytes(*pair)).collect();
+        assert!(decoded.is_empty());
     }
 
     #[test]
