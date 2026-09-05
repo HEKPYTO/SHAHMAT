@@ -26,7 +26,7 @@
 //! field, which goes stale across frozen make/unmake (see `board.rs`).
 //! Perft stores exact counts only; there are no bound flags, best moves,
 //! or replacement policies beyond first-unused-else-shallowest. The
-//! `--tt <MB>` flag in `examples/perft.rs` wires [`Tt`] to [`perft_tt`].
+//! `--tt <MB>` flag in `shahmat-svc perft` wires [`Tt`] to [`perft_tt`].
 
 use crate::board::{board_hash, Board, Move};
 use crate::movegen::{count_legal, generate_legal, make, unmake, MoveList};
