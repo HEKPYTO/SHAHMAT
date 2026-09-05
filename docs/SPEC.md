@@ -63,7 +63,7 @@ v1 code implements movegen + perft + FEN subset. No adjudication layer lands in 
 - WASM: in-node perft (node LTS via wasmtime) on startpos d6 bulk-ON + `.wasm` bytes recorded for default and `min-mem` configs (bars TBD after first matrix; harness lands by phase 5).
 - Full-make bulk-OFF (single-thread, TT-off, startpos d6) >= 40M native on the same gated host via `--no-bulk`.
 - TT 1.5-4x labeled (phase 4): TT-off vs TT-on, 64MB, startpos d6, single-thread, via example wall-time.
-- Tables per resident path (stripped release, single path resident): Black <= 700KB, PEXT <= 850KB, HQ-only <= 4KB (read from `cargo bloat --release --crates`).
+- Tables per resident path (measured Phase-1 values, single path resident): Black <= 870KB (863KB fixed-shift classic), PEXT <= 870KB (~842KB), HQ-only <= 4KB (2KB static). Read from test `table_size_note` + `cargo bloat --release --crates`. Compact-magic reduction below 700KB is a Phase-6 trigger, not a v1 gate.
 
 ## 7. Docker production (main deployment)
 

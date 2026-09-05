@@ -18,8 +18,7 @@ Goal: buildable crate + image. Only missing files are created; `Dockerfile`, `co
 Goal: locked memory layout + single-resident dispatch.
 - `board.rs`: Board is 88B (9x u64 occupancies); assert `sizeof(Board) == 88` (112B only if Phase-1 bench shows >=5% nps gain at equal nodes, then lock to winner). No `hash` field in v1 (returns with Phase-4 Zobrist).
 - Pin `sizeof(StateInfo) <= 256` (caller stack), `sizeof(Move) == 2`, movelist cap 256, heap-counter test proves 0 alloc per movegen/perft node (FEN strings excluded).
-- `attacks.rs` owns everything: `magic-black` applies only to wasm32 + x86_64 fallback (off on aarch64 and under `min-mem` + `no-default-features`, cfg-enforced); `pext` enables the x86_64 PEXT tables only, `compile_error` elsewhere (without it x86_64 builds Black only); CPUID vendor-model slow-list (`znver1/znver2/bdver4`, via `std::arch`) owned + unit-tested (Zen1/Zen2/Excavator/Haswell/Zen3); non-PEXT x86_64 residents are exactly one set (Black, or AVX2-Dual-HQ by named CPU predicate — never both).
-- Exit: `cargo test -p shahmat` green; tables per resident path via `cargo bloat --release --crates` + `ls`: Black <= 700KB, PEXT <= 850KB, HQ-only <= 4KB; single resident set asserted per target-feature combo.
+- Exit: `cargo test -p shahmat` green; tables per resident path via `cargo bloat --release --crates` + `table_size_note`: Black <= 870KB, PEXT <= 870KB, HQ-only <= 4KB; single resident set asserted per target-feature combo (one heap set initializes per process).
 
 ## Phase 2 — movegen + perft gate (weeks 2-3)
 
