@@ -29,7 +29,7 @@
 //! `--tt <MB>` flag in `examples/perft.rs` wires [`Tt`] to [`perft_tt`].
 
 use crate::board::{board_hash, Board, Move};
-use crate::movegen::{generate_legal, make, unmake, MoveList};
+use crate::movegen::{count_legal, generate_legal, make, unmake, MoveList};
 
 /// Maximum supported depth (stack guard: each level holds a movelist plus
 /// an undo token; tables end far earlier). Public entries assert it;
@@ -294,21 +294,22 @@ fn bulk_mut(b: &mut Board, depth: u32) -> u64 {
     if depth == 0 {
         return 1;
     }
+    if depth == 1 {
+        // Direct-legal count: identical totals to `generate_legal(b).len`,
+        // decided set-wise with no MoveList traffic and no legality filter.
+        return count_legal(b) as u64;
+    }
     let mut list = MoveList::new();
     generate_legal(b, &mut list);
-    if depth == 1 {
-        return list.len as u64;
-    }
     if depth == 2 {
-        // Bulk horizon 2: same leaves bulk-1 counts via one extra
-        // make/unmake ply, minus that ply's traffic — totals identical.
+        // Bulk horizon 2: same leaves via one extra make/unmake ply, with
+        // the leaf counts decided set-wise (no filter makes below).
+        // Totals identical.
         let mut nodes = 0u64;
         for i in 0..list.len {
             let mv = list.moves[i];
             let undo = make(b, mv);
-            let mut child = MoveList::new();
-            generate_legal(b, &mut child);
-            nodes += child.len as u64;
+            nodes += count_legal(b) as u64;
             unmake(b, undo, mv);
         }
         return nodes;

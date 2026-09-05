@@ -316,8 +316,12 @@ fn leap(sq: u8, deltas: &[(i8, i8)]) -> u64 {
 // Attack test.
 // ---------------------------------------------------------------------------
 
-/// True if `sq` is attacked by side `by_white`.
-pub fn is_attacked(b: &Board, sq: u8, by_white: bool) -> bool {
+/// True if `sq` is attacked by side `by_white` under occupancy `occ`.
+///
+/// The occupancy parameter exists for king-destination tests: a king never
+/// shields its own destination, so those callers pass `occ` with the moving
+/// king cleared. Plain [`is_attacked`] passes the live occupancy.
+fn is_attacked_occ(b: &Board, sq: u8, by_white: bool, occ: u64) -> bool {
     let own = colour_bb(b, by_white);
 
     // Pawns: attacker squares precomputed per target (rank-edge aware).
@@ -326,7 +330,6 @@ pub fn is_attacked(b: &Board, sq: u8, by_white: bool) -> bool {
         return true;
     }
 
-    let occ = b.occupancies[OCC];
     if knight_attacks(sq) & b.occupancies[KNIGHT] & own != 0 {
         return true;
     }
@@ -340,6 +343,48 @@ pub fn is_attacked(b: &Board, sq: u8, by_white: bool) -> bool {
         return true;
     }
     false
+}
+
+/// True if `sq` is attacked by side `by_white` under the live occupancy.
+pub fn is_attacked(b: &Board, sq: u8, by_white: bool) -> bool {
+    is_attacked_occ(b, sq, by_white, b.occupancies[OCC])
+}
+
+/// Attacker set: enemy pieces attacking `sq` under occupancy `occ`.
+///
+/// Union form of [`is_attacked_occ`] for check evasion: the caller needs the
+/// checker squares (single vs double check, check-mask construction), not
+/// just the boolean.
+fn attackers_to(b: &Board, sq: u8, by_white: bool, occ: u64) -> u64 {
+    let own = colour_bb(b, by_white);
+    let atk = PAWN_ATK[if by_white { 0 } else { 1 }][sq as usize];
+    let mut set = b.occupancies[PAWN] & own & atk;
+    set |= knight_attacks(sq) & b.occupancies[KNIGHT] & own;
+    set |= king_attacks(sq) & b.occupancies[KING] & own;
+    set |= bishop_attacks(sq, occ) & (b.occupancies[BISHOP] | b.occupancies[QUEEN]) & own;
+    set |= rook_attacks(sq, occ) & (b.occupancies[ROOK] | b.occupancies[QUEEN]) & own;
+    set
+}
+
+/// All squares strictly between `a` and `b` (aligned by construction: the
+/// caller passes a king/checker or king/sniper pair from a slider ray).
+/// Unlike [`walk_between`], every square is set, not just occupied ones —
+/// interpositions may land on empty squares.
+fn between_squares(a: u8, b: u8) -> u64 {
+    let (af, ar) = ((a & 7) as i8, (a >> 3) as i8);
+    let (bf, br) = ((b & 7) as i8, (b >> 3) as i8);
+    let step_f = (bf - af).signum();
+    let step_r = (br - ar).signum();
+    let mut between = 0u64;
+    let mut f = af + step_f;
+    let mut r = ar + step_r;
+    // Aligned by construction, so this reaches `(bf, br)` in ≤ 7 steps.
+    while f != bf || r != br {
+        between |= 1u64 << ((r * 8 + f) as u8);
+        f += step_f;
+        r += step_r;
+    }
+    between
 }
 
 /// True if side `white`'s king is in check. Missing king (never in real
@@ -528,44 +573,62 @@ impl<'a> PawnCap<'a> {
         }
     }
 }
-
-fn gen_castling(b: &Board, white: bool, occ: u64, list: &mut MoveList) {
+/// Short-castle legality (rights + emptiness + no-in/through-check).
+/// King-destination safety holds with the live occupancy: any enemy ray to
+/// the destination that the king's departure would unblock passes through
+/// the king square first, so the in-check test below already rejects it.
+fn castle_short_ok(b: &Board, white: bool, occ: u64) -> bool {
     let rights = b.state[0];
     if white {
         // White O-O: rights WK, f1/g1 empty, e1/f1/g1 safe.
-        if rights & WK != 0
+        rights & WK != 0
             && occ & ((1u64 << 5) | (1u64 << 6)) == 0
             && !is_attacked(b, 4, false)
             && !is_attacked(b, 5, false)
             && !is_attacked(b, 6, false)
-        {
-            list.push(Move::new(4, 6, 0, true));
-        }
-        // White O-O-O: rights WQ, b1/c1/d1 empty, e1/d1/c1 safe.
-        if rights & WQ != 0
-            && occ & ((1u64 << 1) | (1u64 << 2) | (1u64 << 3)) == 0
-            && !is_attacked(b, 4, false)
-            && !is_attacked(b, 3, false)
-            && !is_attacked(b, 2, false)
-        {
-            list.push(Move::new(4, 2, 0, true));
-        }
     } else {
-        // Black O-O: e8→g8; O-O-O: e8→c8 (same masks, rank 8).
-        if rights & BK != 0
+        // Black O-O: e8→g8 (same masks, rank 8).
+        rights & BK != 0
             && occ & ((1u64 << 61) | (1u64 << 62)) == 0
             && !is_attacked(b, 60, true)
             && !is_attacked(b, 61, true)
             && !is_attacked(b, 62, true)
-        {
-            list.push(Move::new(60, 62, 0, true));
-        }
-        if rights & BQ != 0
+    }
+}
+
+/// Long-castle legality (same contract as [`castle_short_ok`]).
+fn castle_long_ok(b: &Board, white: bool, occ: u64) -> bool {
+    let rights = b.state[0];
+    if white {
+        // White O-O-O: rights WQ, b1/c1/d1 empty, e1/d1/c1 safe.
+        rights & WQ != 0
+            && occ & ((1u64 << 1) | (1u64 << 2) | (1u64 << 3)) == 0
+            && !is_attacked(b, 4, false)
+            && !is_attacked(b, 3, false)
+            && !is_attacked(b, 2, false)
+    } else {
+        // Black O-O-O: e8→c8 (same masks, rank 8).
+        rights & BQ != 0
             && occ & ((1u64 << 57) | (1u64 << 58) | (1u64 << 59)) == 0
             && !is_attacked(b, 60, true)
             && !is_attacked(b, 59, true)
             && !is_attacked(b, 58, true)
-        {
+    }
+}
+
+fn gen_castling(b: &Board, white: bool, occ: u64, list: &mut MoveList) {
+    if white {
+        if castle_short_ok(b, white, occ) {
+            list.push(Move::new(4, 6, 0, true));
+        }
+        if castle_long_ok(b, white, occ) {
+            list.push(Move::new(4, 2, 0, true));
+        }
+    } else {
+        if castle_short_ok(b, white, occ) {
+            list.push(Move::new(60, 62, 0, true));
+        }
+        if castle_long_ok(b, white, occ) {
             list.push(Move::new(60, 58, 0, true));
         }
     }
@@ -723,6 +786,228 @@ pub fn has_legal(b: &mut Board, white: bool) -> bool {
         }
     }
     false
+}
+// ---------------------------------------------------------------------------
+// Direct-legal counting (bulk-horizon path: no MoveList, no filter makes).
+// ---------------------------------------------------------------------------
+
+/// Number of fully legal moves for the side to move, without materialising
+/// them. Exact by construction: the same mask-based direct-legal core the
+/// filter proves move-by-move, decided set-wise instead —
+/// checkers → king-destination tests → double-check exit → check mask →
+/// pin veto → masked popcounts; EP captures (both-pawns-leave edge) keep
+/// one make-test each, and any pin or pin uncertainty falls back to the
+/// exact filter count. Leaves `b` bit-exact (every make is unmade).
+pub fn count_legal(b: &mut Board) -> u32 {
+    let white = stm_white(b);
+    let king_bb = piece_bb(b, white, KING);
+    if king_bb == 0 {
+        return count_filter(b, white);
+    }
+    let ksq = king_bb.trailing_zeros() as u8;
+    let occ = b.occupancies[OCC];
+    let own = colour_bb(b, white);
+    let foe = colour_bb(b, !white);
+    let checkers = attackers_to(b, ksq, !white, occ);
+    let n = checkers.count_ones();
+    // King destinations are tested with the king cleared: a king never
+    // shields its own destination square.
+    let occ_k = occ ^ (1u64 << ksq);
+    let mut total = 0u32;
+    let mut kt = king_attacks(ksq) & !own;
+    while kt != 0 {
+        let t = kt.trailing_zeros() as u8;
+        kt &= kt - 1;
+        if !is_attacked_occ(b, t, !white, occ_k) {
+            total += 1;
+        }
+    }
+    if n >= 2 {
+        return total;
+    }
+    let (pinned, uncertain) = pinned_mask(b, ksq, occ, own, foe);
+    if uncertain || pinned != 0 {
+        return count_filter(b, white);
+    }
+    // Evasion mask: the whole board when calm; the checker plus the
+    // interposition ray for a lone slider; the checker alone otherwise
+    // (knight/pawn checks admit no block, only capture).
+    let check_mask = if n == 0 {
+        !0u64
+    } else {
+        let csq = checkers.trailing_zeros() as u8;
+        let cbit = 1u64 << csq;
+        let slider =
+            (b.occupancies[BISHOP] | b.occupancies[ROOK] | b.occupancies[QUEEN]) & cbit != 0;
+        if slider {
+            cbit | between_squares(ksq, csq)
+        } else {
+            cbit
+        }
+    };
+    total += count_pawns(b, white, occ, foe, check_mask);
+    total += count_pieces(b, white, occ, own, check_mask);
+    total += count_ep_exact(b, white);
+    if n == 0 {
+        total += castle_short_ok(b, white, occ) as u32 + castle_long_ok(b, white, occ) as u32;
+    }
+    total
+}
+
+/// Exact fallback: the proven make-test filter, counted.
+fn count_filter(b: &mut Board, white: bool) -> u32 {
+    let mut list = MoveList::new();
+    generate_legal_filter(b, &mut list, white);
+    list.len as u32
+}
+
+/// Pawn move count under `mask` (pushes, doubles, captures; promos × 4).
+/// EP is excluded here — [`count_ep_exact`] make-tests it separately.
+fn count_pawns(b: &Board, white: bool, occ: u64, enemy: u64, mask: u64) -> u32 {
+    let mut total = 0u32;
+    let mut pawns = piece_bb(b, white, PAWN);
+    while pawns != 0 {
+        let from = pawns.trailing_zeros() as u8;
+        pawns &= pawns - 1;
+        let f = from & 7;
+        let r = from >> 3;
+        if white {
+            if occ >> (from + 8) & 1 == 0 {
+                if r == 6 {
+                    if mask >> (from + 8) & 1 == 1 {
+                        total += 4;
+                    }
+                } else {
+                    if mask >> (from + 8) & 1 == 1 {
+                        total += 1;
+                    }
+                    if r == 1 && occ >> (from + 16) & 1 == 0 && mask >> (from + 16) & 1 == 1 {
+                        total += 1;
+                    }
+                }
+            }
+            if f > 0 {
+                total += count_pawn_cap(enemy, mask, from + 7, r == 6);
+            }
+            if f < 7 {
+                total += count_pawn_cap(enemy, mask, from + 9, r == 6);
+            }
+        } else {
+            if occ >> (from - 8) & 1 == 0 {
+                if r == 1 {
+                    if mask >> (from - 8) & 1 == 1 {
+                        total += 4;
+                    }
+                } else {
+                    if mask >> (from - 8) & 1 == 1 {
+                        total += 1;
+                    }
+                    if r == 6 && occ >> (from - 16) & 1 == 0 && mask >> (from - 16) & 1 == 1 {
+                        total += 1;
+                    }
+                }
+            }
+            if f > 0 {
+                total += count_pawn_cap(enemy, mask, from - 9, r == 1);
+            }
+            if f < 7 {
+                total += count_pawn_cap(enemy, mask, from - 7, r == 1);
+            }
+        }
+    }
+    total
+}
+
+/// One pawn capture diagonal under `mask` (promo-expanded on the last rank).
+/// The EP square reads empty in `enemy`, so EP never counts here.
+#[inline]
+fn count_pawn_cap(enemy: u64, mask: u64, to: u8, promo_rank: bool) -> u32 {
+    if enemy >> to & 1 == 1 && mask >> to & 1 == 1 {
+        if promo_rank {
+            4
+        } else {
+            1
+        }
+    } else {
+        0
+    }
+}
+
+/// Non-king, non-pawn move count under `mask`: per-piece attack set,
+/// own-blocked squares removed, popcount.
+fn count_pieces(b: &Board, white: bool, occ: u64, own: u64, mask: u64) -> u32 {
+    let mut total = 0u32;
+    let mut knights = piece_bb(b, white, KNIGHT);
+    while knights != 0 {
+        let from = knights.trailing_zeros() as u8;
+        knights &= knights - 1;
+        total += (knight_attacks(from) & !own & mask).count_ones();
+    }
+    let mut bishops = piece_bb(b, white, BISHOP);
+    while bishops != 0 {
+        let from = bishops.trailing_zeros() as u8;
+        bishops &= bishops - 1;
+        total += (bishop_attacks(from, occ) & !own & mask).count_ones();
+    }
+    let mut rooks = piece_bb(b, white, ROOK);
+    while rooks != 0 {
+        let from = rooks.trailing_zeros() as u8;
+        rooks &= rooks - 1;
+        total += (rook_attacks(from, occ) & !own & mask).count_ones();
+    }
+    let mut queens = piece_bb(b, white, QUEEN);
+    while queens != 0 {
+        let from = queens.trailing_zeros() as u8;
+        queens &= queens - 1;
+        total += (queen_attacks(from, occ) & !own & mask).count_ones();
+    }
+    total
+}
+
+/// EP captures, make-tested one by one. At most two candidates exist, and
+/// the victim-presence guard mirrors [`PawnCap::go`] so a stray EP square
+/// on a malformed FEN yields no phantom move. Arithmetic is range-checked
+/// (never wraps): squares gen could never reach contribute nothing here,
+/// exactly as gen emits nothing for them.
+fn count_ep_exact(b: &mut Board, white: bool) -> u32 {
+    let ep = ep_sq(b);
+    if ep >= 64 {
+        return 0;
+    }
+    let f = ep & 7;
+    let (cands, victim) = if white {
+        let v = ep.checked_sub(8);
+        let c0 = if f > 0 { ep.checked_sub(9) } else { None };
+        let c1 = if f < 7 { ep.checked_sub(7) } else { None };
+        ([c0, c1], v)
+    } else {
+        let v = ep.checked_add(8);
+        let c0 = if f > 0 { ep.checked_add(7) } else { None };
+        let c1 = if f < 7 { ep.checked_add(9) } else { None };
+        ([c0, c1], v)
+    };
+    let victim = match victim {
+        Some(v) if v < 64 => v,
+        _ => return 0,
+    };
+    if (b.occupancies[PAWN] & colour_bb(b, !white)) >> victim & 1 == 0 {
+        return 0;
+    }
+    let mut total = 0u32;
+    for cand in cands.into_iter().flatten() {
+        if cand >= 64 {
+            continue;
+        }
+        if (b.occupancies[PAWN] & colour_bb(b, white)) >> cand & 1 == 0 {
+            continue;
+        }
+        let undo = make(b, Move::new(cand, ep, 0, true));
+        if !is_in_check(b, white) {
+            total += 1;
+        }
+        unmake(b, undo, Move::new(cand, ep, 0, true));
+    }
+    total
 }
 
 // ---------------------------------------------------------------------------
@@ -1035,6 +1320,45 @@ mod tests {
                 let mut child = live;
                 make(&mut child, *m);
                 diff_node(&child, depth - 1, fen);
+            }
+        }
+    }
+    /// Direct-legal count must agree with the exact filter on every node of
+    /// tactical trees (checks, pins, EP, castles, promos), and must leave
+    /// the board bit-exact. Fails exactly where a divergence appears.
+    #[test]
+    fn count_legal_matches_filter_everywhere() {
+        let cases: [&str; 7] = [
+            STARTPOS,
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
+            "rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3",
+            "rnbqkbnr/pp1ppppp/8/8/3pP3/8/PPP2PPP/RNBQKBNR b KQkq d3 0 3",
+            "r1bqkbnr/pppp1Qpp/2n5/4p3/2B1P3/8/PPPP1PPP/RNB1K1NR b KQkq - 0 3",
+            "8/6bb/8/8/R1pP2k1/4P3/P7/K7 b - d3 0 1",
+        ];
+        for fen in cases {
+            let b = parse(fen).expect("differential FEN must parse");
+            diff_count(&b, 2, fen);
+        }
+    }
+
+    fn diff_count(b: &Board, depth: u32, fen: &str) {
+        let mut live = *b;
+        let mut list = MoveList::new();
+        generate_legal(&mut live, &mut list);
+        let mut counter = *b;
+        assert_eq!(
+            count_legal(&mut counter),
+            list.len as u32,
+            "count/filter mismatch at {fen}"
+        );
+        assert_eq!(counter, *b, "count_legal mutated the board at {fen}");
+        if depth > 0 {
+            for m in list.as_slice() {
+                let mut child = live;
+                make(&mut child, *m);
+                diff_count(&child, depth - 1, fen);
             }
         }
     }
