@@ -4,3 +4,8 @@ outputs/
 HANDOFF.md
 docs/
 AGENTS.md
+*.md
+!README.md
+!**/README.md
+!readme.md
+!**/readme.md
