@@ -312,25 +312,25 @@ fn strip_move_number(w: &str) -> &str {
 }
 
 /// A SAN token parsed against `&str` slices only (no allocation).
-struct ParsedSan {
+pub(crate) struct ParsedSan {
     /// 0 = normal move, 1 = kingside castle, 2 = queenside castle.
-    castle: u8,
+    pub(crate) castle: u8,
     /// Moved piece index (0 pawn … 5 king).
-    piece: usize,
+    pub(crate) piece: usize,
     /// Destination square (0 = a1 … 63 = h8).
-    dest: u8,
+    pub(crate) dest: u8,
     /// Promotion piece (0 = none, 1 = N, 2 = B, 3 = R, 4 = Q).
-    promo: u8,
+    pub(crate) promo: u8,
     /// A capture (`x`) was written.
-    capture: bool,
+    pub(crate) capture: bool,
     /// Disambiguation file/rank (file-first order, e.g. `Nb1`).
-    dfile: Option<u8>,
-    drank: Option<u8>,
+    pub(crate) dfile: Option<u8>,
+    pub(crate) drank: Option<u8>,
 }
 
 /// Parse a SAN token; `None` when malformed. Trailing `+`/`#`/`!`/`?`
 /// are ignored for matching (check/mate needs no legal-move filter).
-fn parse_san(tok: &str) -> Option<ParsedSan> {
+pub(crate) fn parse_san(tok: &str) -> Option<ParsedSan> {
     let t = tok.trim_end_matches(['!', '?', '+', '#']);
     if t.is_empty() {
         return None;
@@ -438,7 +438,7 @@ fn parse_san(tok: &str) -> Option<ParsedSan> {
 
 /// Match a parsed SAN against the legal-move list. `Ok` on exactly one
 /// hit; `Err(n)` counts the hits (`0` → bad SAN, `>1` → ambiguous).
-fn resolve_san(board: &Board, san: &ParsedSan, list: &[Move]) -> Result<Move, usize> {
+pub(crate) fn resolve_san(board: &Board, san: &ParsedSan, list: &[Move]) -> Result<Move, usize> {
     let white = board.state[0] & 1 == 0;
     let enemy = board.occupancies[if white { 7 } else { 6 }];
     let occ = board.occupancies[8];

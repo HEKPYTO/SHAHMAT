@@ -1,0 +1,797 @@
+//!
+//! [`Game`] owns a [`Board`](crate::board::Board) plus the per-ply history
+//! needed for [`Game::undo`], a header map, and the initial FEN. Load a FEN
+//! or the startpos, then play through games with [`Game::push_san`] or
+//! [`Game::push_uci`], query legal moves as SAN
+//! ([`Game::moves_san`]/[`Game::moves_verbose`]), and export
+//! ([`Game::fen`]/[`Game::to_pgn`]).
+//!
+//!
+//! |---------------------|---------------------------------------|
+//! | `new Chess()`       | [`Game::new`]/[`Game::default`]       |
+//! | `load(fen)`         | [`Game::load_fen`]/[`Game::from_fen`] |
+//! | `turn()`            | [`Game::turn`] (`'w'`/`'b'`)          |
+//! | `fen()`             | [`Game::fen`]                         |
+//! | `board()`           | [`Game::board_rank8_first`]           |
+//! | `moves()`           | [`Game::moves_san`]                   |
+//! | `moves({verbose})`  | [`Game::moves_verbose`]               |
+//! | `move(san)`         | [`Game::push_san`]                    |
+//! | `move({from,to})`   | [`Game::push_uci`]                    |
+//! | `undo()`            | [`Game::undo`]                        |
+//! | `history()`         | [`Game::history_san`]                 |
+//! | `inCheck()`         | [`Game::in_check`]                    |
+//! | `isCheckmate()`     | [`Game::is_checkmate`]                |
+//! | `isStalemate()`     | [`Game::is_stalemate`]                |
+//! | `isGameOver()`      | [`Game::is_game_over`]                |
+//! | `reset()`           | [`Game::reset`]                       |
+//! | `pgn()`             | [`Game::to_pgn`]                      |
+//! | `loadPgn(pgn)`      | [`Game::load_pgn`]                    |
+//! | `get(sq)`           | [`Game::get`]                         |
+//! | `squareColor(sq)`   | [`Game::square_color`]                |
+//! | headers             | [`Game::get_header`]/[`Game::set_header`] |
+//!
+//!
+//! - No draws of any kind: no fifty-move rule, no threefold repetition,
+//!   no insufficient material, no draw claims or offers. [`Game::is_game_over`]
+//!   is checkmate or stalemate only, and [`Game::to_pgn`] always ends `*`.
+//! - No board editing: no `put`/`remove`/`clear`, no loading moves into an
+//!   arbitrary position. Games start from [`STARTPOS`](crate::fen::STARTPOS)
+//!   or a FEN via [`Game::from_fen`]/[`Game::load_fen`] only.
+//! - Move numbering in [`Game::to_pgn`] always starts at 1 (fullmove is not
+//!   stored by FEN render, which always emits `1`).
+
+use crate::board::{Board, Move, StateInfo};
+use crate::fen::{self, STARTPOS};
+use crate::movegen::{generate_legal, has_legal, is_in_check, make, unmake, MoveList};
+use crate::pgn::{self, PgnError};
+use std::collections::BTreeMap;
+use std::fmt;
+
+/// Game failure: bad FEN, unparseable/ambiguous SAN, bad square, or bad PGN.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum GameError {
+    /// FEN text did not parse.
+    Fen(crate::fen::FenError),
+    /// PGN text did not parse.
+    Pgn(PgnError),
+    /// SAN token is malformed or matches no legal move.
+    BadSan(String),
+    /// SAN token matches more than one legal move.
+    AmbiguousSan(String),
+    /// Square name is malformed (`from`/`to` in UCI, `get`, `square_color`).
+    BadSquare(String),
+    /// UCI move matches no legal move (or promotion piece missing/invalid).
+    BadUci(String),
+    /// PGN holds no games.
+    BadPgn(String),
+}
+
+impl fmt::Display for GameError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            GameError::Fen(e) => write!(f, "bad FEN: {e}"),
+            GameError::Pgn(e) => write!(f, "bad PGN: {e}"),
+            GameError::BadSan(s) => write!(f, "bad SAN: {s}"),
+            GameError::AmbiguousSan(s) => write!(f, "ambiguous SAN: {s}"),
+            GameError::BadSquare(s) => write!(f, "bad square: {s}"),
+            GameError::BadUci(s) => write!(f, "bad UCI move: {s}"),
+            GameError::BadPgn(s) => write!(f, "bad PGN: {s}"),
+        }
+    }
+}
+
+impl std::error::Error for GameError {}
+
+impl From<crate::fen::FenError> for GameError {
+    fn from(e: crate::fen::FenError) -> GameError {
+        GameError::Fen(e)
+    }
+}
+
+impl From<PgnError> for GameError {
+    fn from(e: PgnError) -> GameError {
+        GameError::Pgn(e)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct VerboseMove {
+    /// Canonical SAN (with `+`/`#`).
+    pub san: String,
+    /// Origin square name (`"e2"`).
+    pub from: String,
+    /// Destination square name (`"e4"`).
+    pub to: String,
+    /// Moved piece type, lowercase (`'p'`/`'n'`/`'b'`/`'r'`/`'q'`/`'k'`).
+    pub piece: char,
+    /// Side moved, `'w'`/`'b'`.
+    pub color: char,
+    /// Captured piece type, lowercase; `None` when quiet.
+    pub captured: Option<char>,
+    /// Promotion piece type, lowercase; `None` when not a promotion.
+    pub promotion: Option<char>,
+}
+
+/// A playable game: position plus undo history, headers, and initial FEN.
+#[derive(Clone, Debug)]
+pub struct Game {
+    board: Board,
+    history: Vec<(Move, StateInfo, String)>,
+    headers: BTreeMap<String, String>,
+    initial_fen: String,
+}
+
+/// File letter of square `sq` (0 = a1 … 63 = h8).
+#[inline]
+fn file_of(sq: u8) -> u8 {
+    sq % 8
+}
+
+/// Rank number (0-based) of square `sq`.
+#[inline]
+fn rank_of(sq: u8) -> u8 {
+    sq / 8
+}
+
+/// Square name (`"e4"`) of square `sq`.
+fn square_name(sq: u8) -> String {
+    let mut s = String::with_capacity(2);
+    s.push((b'a' + file_of(sq)) as char);
+    s.push((b'1' + rank_of(sq)) as char);
+    s
+}
+
+/// Square index of a name like `"e4"`; `None` when malformed.
+fn parse_square(s: &str) -> Option<u8> {
+    let b = s.as_bytes();
+    if b.len() != 2 {
+        return None;
+    }
+    if !(b'a'..=b'h').contains(&b[0]) || !(b'1'..=b'8').contains(&b[1]) {
+        return None;
+    }
+    Some((b[1] - b'1') * 8 + (b[0] - b'a'))
+}
+
+/// Piece index (0 pawn … 5 king) on `sq`; `None` when empty.
+fn piece_on(board: &Board, sq: u8) -> Option<usize> {
+    let bit = 1u64 << sq;
+    (0..6).find(|&i| board.occupancies[i] & bit != 0)
+}
+
+/// Lowercase piece-type letter of a piece index.
+fn piece_letter(piece: usize) -> char {
+    b"pnbrqk"[piece] as char
+}
+
+/// True when `mv` captures on `board` (enemy-occupied dest, or a pawn
+/// diagonal onto an empty square = en passant).
+fn is_capture(board: &Board, mv: Move, piece: usize) -> bool {
+    let white = board.state[0] & 1 == 0;
+    let enemy = board.occupancies[if white { 7 } else { 6 }];
+    let occ = board.occupancies[8];
+    let (from, to) = (mv.from(), mv.to());
+    (enemy >> to) & 1 == 1 || (piece == 0 && file_of(from) != file_of(to) && (occ >> to) & 1 == 0)
+}
+
+/// Legal moves of `board` (stack buffer, zero heap per call).
+fn legal_moves(board: &Board) -> MoveList {
+    let mut copy = *board;
+    let mut list = MoveList::new();
+    generate_legal(&mut copy, &mut list);
+    list
+}
+
+/// Promotion code (1 N … 4 Q) of a lowercase promo letter.
+fn promo_code(ch: char) -> Option<u8> {
+    match ch {
+        'n' => Some(1),
+        'b' => Some(2),
+        'r' => Some(3),
+        'q' => Some(4),
+        _ => None,
+    }
+}
+
+impl Game {
+    /// Startpos game with empty headers.
+    pub fn new() -> Game {
+        Game {
+            board: fen::parse(STARTPOS).expect("STARTPOS parses"),
+            history: Vec::new(),
+            headers: BTreeMap::new(),
+            initial_fen: STARTPOS.to_string(),
+        }
+    }
+
+    /// Game from a FEN string (also becomes the [`Game::reset`] target).
+    pub fn from_fen(fen_str: &str) -> Result<Game, GameError> {
+        Ok(Game {
+            board: fen::parse(fen_str)?,
+            history: Vec::new(),
+            headers: BTreeMap::new(),
+            initial_fen: fen_str.to_string(),
+        })
+    }
+
+    /// Side to move: `'w'` or `'b'`.
+    pub fn turn(&self) -> char {
+        if self.board.state[0] & 1 == 0 {
+            'w'
+        } else {
+            'b'
+        }
+    }
+
+    /// Current position as FEN.
+    pub fn fen(&self) -> String {
+        fen::render(&self.board)
+    }
+
+    /// Board with rank 8 first: `rows[0]` is rank 8, `rows[7]` rank 1;
+    /// within a row index 0 is file a. Pieces are FEN letters
+    /// (uppercase = white), empties `None`.
+    pub fn board_rank8_first(&self) -> [[Option<char>; 8]; 8] {
+        let mut rows = [[None; 8]; 8];
+        for sq in 0..64u8 {
+            if let Some(p) = piece_on(&self.board, sq) {
+                let mut ch = piece_letter(p);
+                if self.board.occupancies[6] & (1u64 << sq) != 0 {
+                    ch = ch.to_ascii_uppercase();
+                }
+                rows[7 - rank_of(sq) as usize][file_of(sq) as usize] = Some(ch);
+            }
+        }
+        rows
+    }
+
+    /// Canonical SAN for a legal move in the current position (piece
+    /// letter, file/rank disambiguation against other same-piece legal
+    /// moves to the same square, `x` including en passant, `=promotion`,
+    /// `+`/`#` by a make-test on a board copy).
+    pub fn san_of_move(&self, mv: Move) -> String {
+        let from = mv.from();
+        let to = mv.to();
+        let piece = piece_on(&self.board, from).unwrap_or(0);
+        if piece == 5 && file_of(from) == 4 && (file_of(to) == 6 || file_of(to) == 2) {
+            let castle = if file_of(to) == 6 { "O-O" } else { "O-O-O" };
+            return format!("{castle}{}", self.suffix_of(mv));
+        }
+        let list = legal_moves(&self.board);
+        let mut san = String::new();
+        if piece != 0 {
+            san.push(piece_letter(piece).to_ascii_uppercase());
+            let mut same_file = false;
+            let mut same_rank = false;
+            for &other in list.as_slice() {
+                if other.to() != to || other.from() == from {
+                    continue;
+                }
+                if piece_on(&self.board, other.from()) != Some(piece) {
+                    continue;
+                }
+                if file_of(other.from()) == file_of(from) {
+                    same_file = true;
+                }
+                if rank_of(other.from()) == rank_of(from) {
+                    same_rank = true;
+                }
+            }
+            if same_file || same_rank {
+                if !same_file {
+                    san.push((b'a' + file_of(from)) as char);
+                } else if !same_rank {
+                    san.push((b'1' + rank_of(from)) as char);
+                } else {
+                    san.push((b'a' + file_of(from)) as char);
+                    san.push((b'1' + rank_of(from)) as char);
+                }
+            }
+        } else if file_of(from) != file_of(to) {
+            san.push((b'a' + file_of(from)) as char);
+        }
+        if is_capture(&self.board, mv, piece) {
+            san.push('x');
+        }
+        san.push_str(&square_name(to));
+        if mv.promo() != 0 {
+            san.push('=');
+            san.push(piece_letter(mv.promo() as usize).to_ascii_uppercase());
+        }
+        san.push_str(&self.suffix_of(mv));
+        san
+    }
+
+    /// `""`, `"+"`, or `"#"` for `mv` (legal-move-only make-test).
+    fn suffix_of(&self, mv: Move) -> String {
+        let mover_white = self.board.state[0] & 1 == 0;
+        let mut copy = self.board;
+        let _ = make(&mut copy, mv);
+        if !is_in_check(&copy, !mover_white) {
+            return String::new();
+        }
+        if has_legal(&mut copy, !mover_white) {
+            "+".to_string()
+        } else {
+            "#".to_string()
+        }
+    }
+
+    /// All legal moves as SAN, in movegen order.
+    pub fn moves_san(&self) -> Vec<String> {
+        legal_moves(&self.board)
+            .as_slice()
+            .iter()
+            .map(|&mv| self.san_of_move(mv))
+            .collect()
+    }
+
+    /// All legal moves with from/to/piece/capture/promotion fields.
+    pub fn moves_verbose(&self) -> Vec<VerboseMove> {
+        let white = self.board.state[0] & 1 == 0;
+        legal_moves(&self.board)
+            .as_slice()
+            .iter()
+            .map(|&mv| {
+                let from = mv.from();
+                let piece = piece_on(&self.board, from).unwrap_or(0);
+                let captured = if is_capture(&self.board, mv, piece) {
+                    let to = mv.to();
+                    if piece == 0 && (self.board.occupancies[8] >> to) & 1 == 0 {
+                        Some('p')
+                    } else {
+                        piece_on(&self.board, to).map(piece_letter)
+                    }
+                } else {
+                    None
+                };
+                VerboseMove {
+                    san: self.san_of_move(mv),
+                    from: square_name(from),
+                    to: square_name(mv.to()),
+                    piece: piece_letter(piece),
+                    color: if white { 'w' } else { 'b' },
+                    captured,
+                    promotion: if mv.promo() != 0 {
+                        Some(piece_letter(mv.promo() as usize))
+                    } else {
+                        None
+                    },
+                }
+            })
+            .collect()
+    }
+
+    /// Play a SAN move; returns the canonical SAN (with `+`/`#`).
+    pub fn push_san(&mut self, san: &str) -> Result<String, GameError> {
+        let parsed =
+            pgn::parse_san(san.trim()).ok_or_else(|| GameError::BadSan(san.to_string()))?;
+        let list = legal_moves(&self.board);
+        match pgn::resolve_san(&self.board, &parsed, list.as_slice()) {
+            Ok(mv) => self.push_move(mv),
+            Err(1..) => Err(GameError::AmbiguousSan(san.to_string())),
+            Err(_) => Err(GameError::BadSan(san.to_string())),
+        }
+    }
+
+    /// Play a UCI move (`from`/`to` square names, optional lowercase
+    /// promotion piece); returns the canonical SAN.
+    pub fn push_uci(
+        &mut self,
+        from: &str,
+        to: &str,
+        promo: Option<char>,
+    ) -> Result<String, GameError> {
+        let from_sq = parse_square(from).ok_or_else(|| GameError::BadSquare(from.to_string()))?;
+        let to_sq = parse_square(to).ok_or_else(|| GameError::BadSquare(to.to_string()))?;
+        let want = match promo {
+            None => 0,
+            Some(ch) => promo_code(ch.to_ascii_lowercase())
+                .ok_or_else(|| GameError::BadUci(format!("{from}{to}{ch}")))?,
+        };
+        let list = legal_moves(&self.board);
+        let mut found: Option<Move> = None;
+        for &mv in list.as_slice() {
+            if mv.from() != from_sq || mv.to() != to_sq {
+                continue;
+            }
+            if mv.promo() != want {
+                continue;
+            }
+            found = Some(mv);
+            break;
+        }
+        match found {
+            Some(mv) => self.push_move(mv),
+            None => Err(GameError::BadUci(match promo {
+                Some(ch) => format!("{from}{to}{ch}"),
+                None => format!("{from}{to}"),
+            })),
+        }
+    }
+
+    /// Record a resolved legal move; shared tail of push_san/push_uci.
+    fn push_move(&mut self, mv: Move) -> Result<String, GameError> {
+        let san = self.san_of_move(mv);
+        let undo = make(&mut self.board, mv);
+        self.history.push((mv, undo, san.clone()));
+        Ok(san)
+    }
+
+    /// Take back the last ply; returns its SAN, or `None` when empty.
+    pub fn undo(&mut self) -> Option<String> {
+        let (mv, undo, san) = self.history.pop()?;
+        unmake(&mut self.board, undo, mv);
+        Some(san)
+    }
+
+    /// Played moves as SAN, oldest first.
+    pub fn history_san(&self) -> Vec<String> {
+        self.history.iter().map(|(_, _, s)| s.clone()).collect()
+    }
+
+    /// Side to move is in check.
+    pub fn in_check(&self) -> bool {
+        is_in_check(&self.board, self.turn() == 'w')
+    }
+
+    /// Side to move is checkmated.
+    pub fn is_checkmate(&self) -> bool {
+        if !self.in_check() {
+            return false;
+        }
+        let mut copy = self.board;
+        !has_legal(&mut copy, self.turn() == 'w')
+    }
+
+    /// Side to move is stalemated.
+    pub fn is_stalemate(&self) -> bool {
+        if self.in_check() {
+            return false;
+        }
+        let mut copy = self.board;
+        !has_legal(&mut copy, self.turn() == 'w')
+    }
+
+    /// Checkmate or stalemate (no draws exist in the core subset).
+    pub fn is_game_over(&self) -> bool {
+        self.is_checkmate() || self.is_stalemate()
+    }
+
+    /// Back to the initial FEN with empty history (headers kept).
+    pub fn reset(&mut self) {
+        if let Ok(board) = fen::parse(&self.initial_fen) {
+            self.board = board;
+        }
+        self.history.clear();
+    }
+
+    /// Load a new FEN: clears history, keeps headers, and becomes the new
+    /// [`Game::reset`] target.
+    pub fn load_fen(&mut self, fen_str: &str) -> Result<(), GameError> {
+        self.board = fen::parse(fen_str)?;
+        self.history.clear();
+        self.initial_fen = fen_str.to_string();
+        Ok(())
+    }
+
+    /// Export tags plus numbered SAN with a trailing `*`.
+    pub fn to_pgn(&self) -> String {
+        let mut out = String::new();
+        for (name, value) in &self.headers {
+            out.push_str(&format!("[{name} \"{value}\"]\n"));
+        }
+        if !self.headers.is_empty() {
+            out.push('\n');
+        }
+        let white_starts = self
+            .initial_fen
+            .split_whitespace()
+            .nth(1)
+            .map(|stm| stm != "b")
+            .unwrap_or(true);
+        let mut no = 1u32;
+        let mut white_to_move = white_starts;
+        let mut tokens: Vec<String> = Vec::with_capacity(self.history.len() + 1);
+        for (_, _, san) in &self.history {
+            if white_to_move {
+                tokens.push(format!("{no}. {san}"));
+            } else if tokens.is_empty() {
+                tokens.push(format!("{no}... {san}"));
+                no += 1;
+                white_to_move = true;
+                continue;
+            } else {
+                if let Some(last) = tokens.last_mut() {
+                    last.push(' ');
+                    last.push_str(san);
+                }
+            }
+            if !white_to_move {
+                no += 1;
+            }
+            white_to_move = !white_to_move;
+        }
+        out.push_str(&tokens.join(" "));
+        if !tokens.is_empty() {
+            out.push(' ');
+        }
+        out.push('*');
+        out
+    }
+
+    /// Load the first game of a PGN string: tags become headers, the `FEN`
+    /// tag (or startpos) becomes the position, and its moves replay.
+    pub fn load_pgn(&mut self, src: &str) -> Result<(), GameError> {
+        let games = pgn::load_pgn(src)?;
+        let game = games
+            .into_iter()
+            .next()
+            .ok_or_else(|| GameError::BadPgn("no games".to_string()))?;
+        let start = game
+            .startfen
+            .clone()
+            .unwrap_or_else(|| STARTPOS.to_string());
+        self.board = fen::parse(&start)?;
+        self.initial_fen = start;
+        self.history.clear();
+        self.headers.clear();
+        for (name, value) in &game.tags {
+            self.headers.insert(name.clone(), value.clone());
+        }
+        for &mv in &game.moves {
+            self.push_move(mv)?;
+        }
+        Ok(())
+    }
+
+    /// Piece on a square as a FEN letter (uppercase = white);
+    /// `None` when empty or the square name is bad.
+    pub fn get(&self, square: &str) -> Option<char> {
+        let sq = parse_square(square)?;
+        let piece = piece_on(&self.board, sq)?;
+        let mut ch = piece_letter(piece);
+        if self.board.occupancies[6] & (1u64 << sq) != 0 {
+            ch = ch.to_ascii_uppercase();
+        }
+        Some(ch)
+    }
+
+    /// `"light"`/`"dark"` for a square (`a1` is dark); `None` when bad.
+    pub fn square_color(&self, square: &str) -> Option<&'static str> {
+        let sq = parse_square(square)?;
+        if (file_of(sq) + rank_of(sq)).is_multiple_of(2) {
+            Some("dark")
+        } else {
+            Some("light")
+        }
+    }
+
+    /// Header value (`None` when absent).
+    pub fn get_header(&self, name: &str) -> Option<&str> {
+        self.headers.get(name).map(String::as_str)
+    }
+
+    /// Set a header (emitted by [`Game::to_pgn`], restored by [`Game::load_pgn`]).
+    pub fn set_header(&mut self, name: &str, value: &str) {
+        self.headers.insert(name.to_string(), value.to_string());
+    }
+}
+
+impl Default for Game {
+    fn default() -> Game {
+        Game::new()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn play(moves: &[&str]) -> Game {
+        let mut g = Game::new();
+        for m in moves {
+            g.push_san(m).unwrap();
+        }
+        g
+    }
+
+    #[test]
+    fn scholars_mate_exact_sans() {
+        let mut g = Game::new();
+        let want = ["e4", "e5", "Qh5", "Nc6", "Bc4", "Nf6", "Qxf7#"];
+        for (i, m) in want.iter().enumerate() {
+            assert_eq!(g.push_san(m).unwrap(), *m, "ply {i}");
+        }
+        assert!(g.in_check());
+        assert!(g.is_checkmate());
+        assert!(g.is_game_over());
+        assert!(!g.is_stalemate());
+        assert_eq!(g.history_san(), want);
+    }
+
+    #[test]
+    fn fools_mate_exact_sans() {
+        let mut g = Game::new();
+        let want = ["f3", "e5", "g4", "Qh4#"];
+        for m in want {
+            assert_eq!(g.push_san(m).unwrap(), m);
+        }
+        assert!(g.is_checkmate());
+        assert!(g.is_game_over());
+    }
+
+    #[test]
+    fn castling_game_both_sides() {
+        let mut g = play(&[
+            "e4", "e5", "Nf3", "Nc6", "Bc4", "Bc5", "O-O", "Nf6", "d3", "O-O",
+        ]);
+        assert_eq!(g.history_san()[6], "O-O");
+        assert_eq!(g.history_san()[9], "O-O");
+        assert_eq!(g.get("g1"), Some('K'));
+        assert_eq!(g.get("e1"), None);
+        assert_eq!(g.get("g8"), Some('k'));
+        assert_eq!(g.get("f1"), Some('R'));
+        assert_eq!(g.get("f8"), Some('r'));
+        assert!(!g.is_game_over());
+        g.undo();
+        assert_eq!(g.get("e8"), Some('k'));
+    }
+
+    #[test]
+    fn promotion_san_and_check() {
+        let mut g = Game::from_fen("7k/5P2/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+        assert_eq!(g.push_san("f8=Q").unwrap(), "f8=Q+");
+        assert!(g.in_check());
+        assert!(!g.is_checkmate());
+        g.undo();
+        assert_eq!(g.push_uci("f7", "f8", Some('n')).unwrap(), "f8=N");
+        assert!(!g.in_check());
+    }
+
+    #[test]
+    fn knight_file_disambiguation() {
+        let g = Game::from_fen("7k/8/8/8/8/2N1N3/8/4K3 w - - 0 1").unwrap();
+        let sans = g.moves_san();
+        assert!(sans.contains(&"Ncd5".to_string()));
+        assert!(sans.contains(&"Ned5".to_string()));
+        let mut g = g;
+        assert_eq!(g.push_san("Ncd5").unwrap(), "Ncd5");
+        assert_eq!(g.get("d5"), Some('N'));
+    }
+
+    #[test]
+    fn knight_rank_disambiguation() {
+        let g = Game::from_fen("7k/8/8/8/8/3N4/8/3NK3 w - - 0 1").unwrap();
+        let sans = g.moves_san();
+        assert!(sans.contains(&"N1b2".to_string()));
+        assert!(sans.contains(&"N3b2".to_string()));
+        let mut g = g;
+        assert_eq!(g.push_san("N3b2").unwrap(), "N3b2");
+    }
+
+    #[test]
+    fn rook_rank_disambiguation() {
+        let g = Game::from_fen("R7/7k/8/8/8/8/8/R3K3 w - - 0 1").unwrap();
+        let sans = g.moves_san();
+        assert!(sans.contains(&"R1a5".to_string()));
+        assert!(sans.contains(&"R8a5".to_string()));
+        let mut g = g;
+        assert_eq!(g.push_san("R1a5").unwrap(), "R1a5");
+    }
+
+    #[test]
+    fn undo_restores_fen() {
+        let mut g = Game::new();
+        let start = g.fen();
+        g.push_san("e4").unwrap();
+        let after_e4 = g.fen();
+        g.push_san("e5").unwrap();
+        g.undo();
+        assert_eq!(g.fen(), after_e4);
+        g.undo();
+        assert_eq!(g.fen(), start);
+        assert!(g.undo().is_none());
+        assert_eq!(g.history_san(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn from_fen_error_paths() {
+        assert!(Game::from_fen("not a fen").is_err());
+        assert!(Game::from_fen("").is_err());
+        assert!(
+            Game::from_fen("rnbqkbnr/pppppppp/8/8/8/8/PPPXPPPP/RNBQKBNR w KQkq - 0 1").is_err()
+        );
+        assert!(Game::from_fen(STARTPOS).is_ok());
+    }
+
+    #[test]
+    fn push_errors() {
+        let mut g = Game::new();
+        assert!(matches!(g.push_san("Qh5"), Err(GameError::BadSan(_))));
+        assert!(matches!(g.push_san("junk"), Err(GameError::BadSan(_))));
+        assert!(matches!(
+            g.push_uci("e2", "e9", None),
+            Err(GameError::BadSquare(_))
+        ));
+        assert_eq!(
+            g.push_uci("e2", "e5", None),
+            Err(GameError::BadUci("e2e5".to_string()))
+        );
+        assert_eq!(g.push_uci("e2", "e4", None).unwrap(), "e4");
+    }
+
+    #[test]
+    fn en_passant_san() {
+        let mut g =
+            Game::from_fen("rnbqkb1r/ppp1pppp/5n2/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3")
+                .unwrap();
+        assert!(g.moves_san().contains(&"exd6".to_string()));
+        assert_eq!(g.push_san("exd6").unwrap(), "exd6");
+        assert_eq!(g.get("d6"), Some('P'));
+        assert_eq!(g.get("d5"), None);
+    }
+
+    #[test]
+    fn to_pgn_round_trip_via_load_pgn() {
+        let mut g = play(&["e4", "e5", "Qh5", "Nc6", "Bc4", "Nf6", "Qxf7#"]);
+        g.set_header("White", "Alice");
+        g.set_header("Black", "Bob");
+        let pgn = g.to_pgn();
+        assert!(pgn.contains("[White \"Alice\"]"));
+        assert!(pgn.ends_with('*'));
+        let mut h = Game::new();
+        h.load_pgn(&pgn).unwrap();
+        assert_eq!(h.history_san(), g.history_san());
+        assert_eq!(h.fen(), g.fen());
+        assert_eq!(h.get_header("White"), Some("Alice"));
+    }
+
+    #[test]
+    fn reset_and_load_fen() {
+        let mut g = play(&["e4", "e5"]);
+        g.reset();
+        assert_eq!(g.fen(), STARTPOS);
+        assert!(g.history_san().is_empty());
+        g.load_fen("7k/5P2/8/8/8/8/8/4K3 w - - 0 1").unwrap();
+        assert_eq!(g.turn(), 'w');
+        g.reset();
+        assert_eq!(g.get("f7"), Some('P'));
+        assert!(g.load_fen("bogus").is_err());
+    }
+
+    #[test]
+    fn get_and_square_color_spots() {
+        let g = Game::new();
+        assert_eq!(g.get("e1"), Some('K'));
+        assert_eq!(g.get("e2"), Some('P'));
+        assert_eq!(g.get("e7"), Some('p'));
+        assert_eq!(g.get("e4"), None);
+        assert_eq!(g.get("i9"), None);
+        assert_eq!(g.square_color("a1"), Some("dark"));
+        assert_eq!(g.square_color("h1"), Some("light"));
+        assert_eq!(g.square_color("e4"), Some("light"));
+        assert_eq!(g.square_color("a8"), Some("light"));
+        assert_eq!(g.square_color("z9"), None);
+        let rows = g.board_rank8_first();
+        assert_eq!(rows[0][0], Some('r'));
+        assert_eq!(rows[7][4], Some('K'));
+        assert_eq!(rows[4][4], None);
+    }
+
+    #[test]
+    fn verbose_and_turn_and_board() {
+        let g = Game::new();
+        assert_eq!(g.turn(), 'w');
+        assert_eq!(g.moves_verbose().len(), 20);
+        let e4 = g
+            .moves_verbose()
+            .into_iter()
+            .find(|m| m.san == "e4")
+            .unwrap();
+        assert_eq!(e4.from, "e2");
+        assert_eq!(e4.to, "e4");
+        assert_eq!(e4.piece, 'p');
+        assert_eq!(e4.color, 'w');
+    }
+}
