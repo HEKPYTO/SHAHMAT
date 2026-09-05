@@ -13,10 +13,14 @@ path = "src/main.rs"
 name = "shahmat"
 crate-type = ["cdylib", "rlib"]
 
+[dependencies]
+rustler = { version = "0.38", optional = true }
+
 [features]
 default = ["magic-black"]
 magic-black = []
 min-mem = []
+nif = ["dep:rustler"]
 pext = []
 
 [profile.release]

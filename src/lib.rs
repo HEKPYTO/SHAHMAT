@@ -12,6 +12,8 @@ pub mod attacks;
 pub mod board;
 pub mod fen;
 pub mod movegen;
+#[cfg(feature = "nif")]
+pub mod nif;
 pub mod perft;
 pub mod pgn;
 
