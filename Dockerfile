@@ -1,5 +1,5 @@
 # builder digest resolved 2026-09-05 via `docker pull rust:1.93-slim-trixie` (RepoDigest below)
-FROM rust:1.93-slim-trixie@sha256:c0a38f5662afdb298898da1d70b909af4bda4e0acff2dc52aea6360a9b9c6956 AS build
+FROM rust:1.98-slim-trixie@sha256:17d1ba895198f9934c6314ec5346a0d5115372f3243390c3d731e242f35c2f27 AS build
 WORKDIR /app
 ARG TARGETARCH
 ARG RUSTFLAGS=""
