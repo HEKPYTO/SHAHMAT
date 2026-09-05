@@ -3,8 +3,9 @@
 //! Entry points share one recursion shape (depth 0 = 1):
 //!
 //! - [`perft`] — full make/unmake at every level (bulk-OFF reference).
-//! - [`perft_bulk`] — bulk count at depth 1 (`moves.len()`, no make/unmake
-//!   at the bulk depth); full make/unmake above. Same totals as [`perft`].
+//!
+//! - [`perft_bulk`] — bulk count at depth 2 (child move-count sums, no
+//!   make/unmake below the horizon); full make/unmake above. Same totals.
 //! - [`perft_tt`] — full make/unmake with a [`Tt`] probe/store at every
 //!   level below the root (transposition cache; identical totals).
 //! - [`divide`] — per-root-move counts in fixed generation order.
@@ -47,9 +48,9 @@ pub fn perft(board: &Board, depth: u32) -> u64 {
     full_mut(&mut b, depth)
 }
 
-/// Bulk perft: identical totals to [`perft`], but depth 1 counts
-/// `moves.len()` without make/unmake at the bulk depth. Depth 0 = 1.
-#[inline(never)]
+/// Bulk perft: identical totals to [`perft`], but depth 2 counts
+/// `sum(generate_legal(child).len)` without make/unmake below the bulk
+/// horizon. Depth 0 = 1, depth 1 = `moves.len()`.
 pub fn perft_bulk(board: &Board, depth: u32) -> u64 {
     assert!(
         depth <= MAX_DEPTH,
@@ -297,6 +298,20 @@ fn bulk_mut(b: &mut Board, depth: u32) -> u64 {
     generate_legal(b, &mut list);
     if depth == 1 {
         return list.len as u64;
+    }
+    if depth == 2 {
+        // Bulk horizon 2: same leaves bulk-1 counts via one extra
+        // make/unmake ply, minus that ply's traffic — totals identical.
+        let mut nodes = 0u64;
+        for i in 0..list.len {
+            let mv = list.moves[i];
+            let undo = make(b, mv);
+            let mut child = MoveList::new();
+            generate_legal(b, &mut child);
+            nodes += child.len as u64;
+            unmake(b, undo, mv);
+        }
+        return nodes;
     }
     let mut nodes = 0u64;
     for i in 0..list.len {
