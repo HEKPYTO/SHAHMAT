@@ -1,7 +1,7 @@
 # SHAHMAT — long-term plan, begin -> production (revised 5 SEP 2026)
 Goal: no rules — fastest + least-memory + movegen-correct efficient chess lib across all platforms (x86-64, ARM64, WASM). Main deployment is the Docker container; every image-shipping phase ends compose-green.
 
-Grandfathered docs (committable as markdown): `docs/SPEC.md`, `docs/PLAN.md`, `HANDOFF.md`.
+Grandfathered docs (committable as markdown): `docs/SPEC.md`, `docs/PLAN.md`.
 Global: each phase's exit lists its own gates. Phases shipping images also end with `docker compose up --build` green (exit 0, svc healthy). Commands using `-p shahmat` are canonical; `sha` means `git rev-parse --short HEAD`; `--push` runs only after explicit user approval per `AGENTS.md` Privacy.
 
 ## Phase 0 — scaffold (day 1)
