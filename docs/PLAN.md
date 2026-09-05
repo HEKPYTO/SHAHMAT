@@ -16,7 +16,7 @@ Goal: buildable crate + image. Only missing files are created; `Dockerfile`, `co
 ## Phase 1 — board + sliders (week 1)
 
 Goal: locked memory layout + single-resident dispatch.
-- `board.rs`: Board is 88B (9x u64 occupancies); assert `sizeof(Board) == 88` (112B only if Phase-1 bench shows >=5% nps gain at equal nodes, then lock to winner). No `hash` field in v1 (returns with Phase-4 Zobrist).
+- `board.rs`: Board is 88B (9x u64 occupancies); assert `sizeof(Board) == 88` (112B only if Phase-1 bench shows >=5% nps gain at equal nodes, then lock to winner). No `hash` field in v1 (returns with Phase-4 Zobrist, growing Board to 96B — Phase-1 record, superseded).
 - Pin `sizeof(StateInfo) <= 256` (caller stack), `sizeof(Move) == 2`, movelist cap 256, heap-counter test proves 0 alloc per movegen/perft node (FEN strings excluded).
 - Exit: `cargo test -p shahmat` green; tables per resident path via `cargo bloat --release --crates` + `table_size_note`: Black <= 870KB, PEXT <= 870KB, HQ-only <= 4KB; single resident set asserted per target-feature combo (one heap set initializes per process).
 

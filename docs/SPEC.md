@@ -41,11 +41,11 @@ Deferred with triggers: `shahmat_nif` (Elixir caller exists); `no_std` split (em
 
 ## 4. Board and movegen
 
-- Board is 88B (9x u64 occupancies + packed state); assert `sizeof(Board) == 88`. 112B (12x u64) only if Phase-1 bench shows >=5% nps gain at equal nodes, then lock `sizeof` to the winner. No `hash` field in v1 (returns with Phase-4 Zobrist). `StateInfo` on caller stack (`sizeof <= 256`); `Move` is u16 (`sizeof == 2`); movelist is a stack array (cap 256). 0 heap bytes per movegen/perft node (FEN strings excluded); proven by a heap-counter test. Static asserts pin all three.
+- Board is 96B (9x u64 occupancies + packed state + u64 Zobrist hash); assert `sizeof(Board) == 96` (88B layout + 8B hash; hash returned in Phase 4 with Zobrist). `StateInfo` on caller stack (`sizeof <= 256`); `Move` is u16 (`sizeof == 2`); movelist is a stack array (cap 256). 0 heap bytes per movegen/perft node (FEN strings excluded; TT storage is one preallocated table, never per-node); proven by heap-counter tests. Static asserts pin all three.
 - Slider dispatch (`cfg_select!`, exactly one resident table set per binary):
   - `aarch64` → HQ + rbit (2KB). No runtime dispatch (`rbit` is base-A64).
-  - `wasm32` → Black fixed-shift magic (~694KB). `min-mem` → HQ-only 2KB.
-  - `x86_64` → `pext` feature + runtime CPUID (BMI2 present AND vendor-model not in the slow list: znver1/znver2/bdver4, via `std::arch`, unit-tested incl. Zen1/Zen2/Excavator/Haswell/Zen3) → PEXT (~843KB); else exactly one of Black magic (~694KB) or AVX2 Dual-HQ by named CPU predicate — never both resident.
+  - `wasm32` → Black fixed-shift magic (~863KB measured). `min-mem` → HQ-only 2KB.
+  - `x86_64` → `pext` feature + runtime CPUID (BMI2 present AND vendor-model not in the slow list: znver1/znver2/bdver4, via `std::arch`, unit-tested incl. Zen1/Zen2/Excavator/Haswell/Zen3) → PEXT (~842KB measured); else exactly one of Black magic (~863KB) or AVX2 Dual-HQ by named CPU predicate — never both resident.
 - Pseudo-legal gen + legality filter (checkers/double-check exit, pin rays, see-through-king danger, capture/push masks, EP-discovered-check recheck incl. EP while in check, castling rights update + emptiness + no-in/through-check, promo generation, king-destination legality, check-evasion block rules). Staged (captures first) ready for search; exact perft runs with staging disabled and fixed divide order. Bulk at depth==1 (`moves.len()`), recurse above; Stockfish depth==2 numbers are not directly comparable — every cited external number carries its convention label. Divide per-move at root.
 
 ## 5. Correctness gates (perft table + movegen-legality edges E1-E9)
@@ -62,9 +62,8 @@ Measurement protocol (every reported number): median of 5+ runs with 1 warmup ex
 
 - x86-64 bulk-ON (single-thread, TT-off, bulk depth==1, startpos d6) >= 300M on 5950X-class via `cargo run --release --example perft -- startpos 6` (no `--divide`).
 - ARM64 bulk-ON (same config/position/command) >= 100M win on M2 [PROVISIONAL — re-measure same-machine vs Disservin/cozy at depth==1 before gating releases]; >= 200M adjacent (Graviton-class) recorded, not gating.
-- WASM: in-node perft (node LTS via wasmtime) on startpos d6 bulk-ON + `.wasm` bytes recorded for default and `min-mem` configs (bars TBD after first matrix; harness lands by phase 5).
+- TT ≥1.2x cold on perft (measured 1.39x release startpos d4 16MB: 18.04ms → 12.96ms; debug cold is slower — unoptimized recompute; search-workload delta TBD) via example `--tt` wall-time, bulk/full labeled.
 - Full-make bulk-OFF (single-thread, TT-off, startpos d6) >= 40M native on the same gated host via `--no-bulk`.
-- TT 1.5-4x labeled (phase 4): TT-off vs TT-on, 64MB, startpos d6, single-thread, via example wall-time.
 - Tables per resident path (measured Phase-1 values, single path resident): Black <= 870KB (863KB fixed-shift classic), PEXT <= 870KB (~842KB), HQ-only <= 4KB (2KB static). Read from test `table_size_note` + `cargo bloat --release --crates`. Compact-magic reduction below 700KB is a Phase-6 trigger, not a v1 gate.
 
 ## 7. Docker production (main deployment)

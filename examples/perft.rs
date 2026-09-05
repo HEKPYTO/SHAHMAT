@@ -1,16 +1,19 @@
-//! Perft gate harness: `startpos <depth> | <fen...> <depth> [--no-bulk] [--divide]`.
+//! Perft gate harness: `startpos <depth> | <fen...> <depth> [--no-bulk] [--divide] [--tt <MB>]`.
 //!
 //! Bulk counting is the default; `--no-bulk` runs full make/unmake.
-//! `--divide` prints the per-root-move split before the total. Every run
-//! prints wall-time and nps.
+//! `--divide` prints the per-root-move split before the total. `--tt <MB>`
+//! runs the full-make path through a transposition table (rejected with
+//! `--divide`). Every run prints wall-time and nps.
 
 use shahmat::fen::{parse, STARTPOS};
-use shahmat::perft::{divide, perft, perft_bulk};
+use shahmat::perft::{divide, perft, perft_bulk, perft_tt, Tt};
 use std::process::ExitCode;
 use std::time::Instant;
 
 fn usage() -> ExitCode {
-    eprintln!("usage: perft <startpos <depth> | <fen...> <depth>> [--no-bulk] [--divide]");
+    eprintln!(
+        "usage: perft <startpos <depth> | <fen...> <depth>> [--no-bulk] [--divide] [--tt <MB>]"
+    );
     ExitCode::from(2)
 }
 
@@ -18,13 +21,27 @@ fn main() -> ExitCode {
     let argv: Vec<String> = std::env::args().skip(1).collect();
     let mut bulk = true;
     let mut show_divide = false;
+    let mut tt_mb: Option<usize> = None;
     let mut positional: Vec<String> = Vec::new();
-    for a in &argv {
-        match a.as_str() {
+    let mut i = 0;
+    while i < argv.len() {
+        match argv[i].as_str() {
             "--no-bulk" => bulk = false,
             "--divide" => show_divide = true,
-            _ => positional.push(a.clone()),
+            "--tt" => {
+                i += 1;
+                match argv.get(i).and_then(|s| s.parse().ok()) {
+                    Some(mb) => tt_mb = Some(mb),
+                    None => return usage(),
+                }
+            }
+            _ => positional.push(argv[i].clone()),
         }
+        i += 1;
+    }
+    if show_divide && tt_mb.is_some() {
+        eprintln!("--tt is rejected with --divide (divide uses the bulk path)");
+        return usage();
     }
     // Position + depth from positionals: `startpos 6`, `<depth>` (= startpos),
     // `<fen> <depth>` (quoted), or six FEN fields + `<depth>` (unquoted).
@@ -55,6 +72,11 @@ fn main() -> ExitCode {
             total += r.nodes;
         }
         total
+    } else if let Some(mb) = tt_mb {
+        let mut tt = Tt::new(mb);
+        let n = perft_tt(&board, depth, &mut tt);
+        eprintln!("tt: {} probes, {} hits", tt.probes(), tt.hits());
+        n
     } else if bulk {
         perft_bulk(&board, depth)
     } else {
