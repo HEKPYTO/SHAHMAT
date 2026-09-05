@@ -1,0 +1,18 @@
+name: shahmat
+services:
+  svc:
+    build: { context: ., dockerfile: Dockerfile }
+    image: ${IMAGE:-shahmat-svc:local}
+    ports: ["8080:8080"]
+    user: "65532:65532"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    stop_grace_period: 10s
+    restart: unless-stopped
+    environment: { RUST_LOG: info, PORT: "8080", IMAGE: "${IMAGE:-shahmat-svc:local}" }
+    healthcheck: { test: ["CMD", "/svc", "--health-check"], interval: 10s, timeout: 2s, retries: 3, start_period: 5s }
+    logging: { driver: json-file, options: { max-size: 10m, max-file: "3" } }
+    deploy:
+      resources: { limits: { cpus: "4", memory: 1G }, reservations: { memory: 256M } }
