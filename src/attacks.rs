@@ -29,8 +29,11 @@ compile_error!(
 /// CPU vendor from CPUID leaf 0 (`EBX, EDX, ECX` words).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum CpuVendor {
+    /// AMD (`AuthenticAMD`); slowness depends on family/model (see [`bmi2_is_slow`]).
     Amd,
+    /// Intel (`GenuineIntel`); never slow-BMI2.
     Intel,
+    /// Any other vendor string; never slow-BMI2.
     Other,
 }
 
@@ -94,9 +97,15 @@ pub fn bmi2_is_slow(vendor: CpuVendor, family: u32, model: u32) -> bool {
 ///   results are identical).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Engine {
+    /// Hyperbola quintessence + `rbit` (2 KiB line tables).
     Hq,
+    /// Black fixed-shift magic (~863 KB measured).
     Black,
+    /// x86_64 BMI2 gather (~842 KB measured); selected only when BMI2 is
+    /// present and not slow (see [`select_engine`]).
     Pext,
+    /// AVX2-present fallback: runs on the HQ core (identical results; the
+    /// AVX2-vectorised form is a later perf opportunity).
     Avx2Hq,
 }
 /// x86_64 path selection: BMI2 present AND not slow → PEXT, else the
@@ -128,26 +137,31 @@ fn cpu_is_slow_bmi2() -> bool {
     }
 }
 
+/// Resident engine: HQ (`rbit` is base-A64; the `magic-black` feature is ignored here).
 #[cfg(target_arch = "aarch64")]
 pub fn engine() -> Engine {
     Engine::Hq
 }
 
+/// Resident engine: HQ (2 KiB; keeps `min-mem` wasm binaries small).
 #[cfg(all(target_arch = "wasm32", feature = "min-mem"))]
 pub fn engine() -> Engine {
     Engine::Hq
 }
 
+/// Resident engine: Black magic (default wasm tables).
 #[cfg(all(target_arch = "wasm32", not(feature = "min-mem")))]
 pub fn engine() -> Engine {
     Engine::Black
 }
 
+/// Resident engine: HQ (`min-mem` opts out of the Black magic tables).
 #[cfg(all(target_arch = "x86_64", not(feature = "pext"), feature = "min-mem"))]
 pub fn engine() -> Engine {
     Engine::Hq
 }
 
+/// Resident engine: Black magic (default x86_64 tables without `pext`).
 #[cfg(all(
     target_arch = "x86_64",
     not(feature = "pext"),
@@ -156,6 +170,8 @@ pub fn engine() -> Engine {
 pub fn engine() -> Engine {
     Engine::Black
 }
+/// Resident engine: runtime pick — PEXT unless BMI2 is missing or slow, else
+/// the single compiled-in fallback (see [`select_engine`]).
 #[cfg(all(target_arch = "x86_64", feature = "pext", not(feature = "min-mem")))]
 pub fn engine() -> Engine {
     select_engine(

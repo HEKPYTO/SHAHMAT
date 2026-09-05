@@ -12,7 +12,7 @@
 //!
 //! Hot paths (`perft`, `perft_bulk`, [`perft_tt`]) use only stack storage:
 //! the input board is copied once (96 B, `Board: Copy`), each level holds
-//! one [`MoveList`] plus one [`StateInfo`] undo token, and nothing boxes,
+//! one [`MoveList`] plus one [`StateInfo`](crate::board::StateInfo) undo token, and nothing boxes,
 //! collects, or formats. TT probe/store index a preallocated table (one
 //! `Vec` at [`Tt`] construction, never grows) — no hot-path allocation.
 //! [`divide`] is the deliberate exception — it returns an owned [`Vec`]
@@ -21,7 +21,7 @@
 //!
 //! ## TT notes
 //!
-//! Keys are full-recompute [`board_hash`](crate::board::board_hash) values
+//! Keys are full-recompute [`board_hash`] values
 //! taken on the live board at each node — never the cached `Board::hash`
 //! field, which goes stale across frozen make/unmake (see `board.rs`).
 //! Perft stores exact counts only; there are no bound flags, best moves,

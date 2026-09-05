@@ -83,9 +83,19 @@
 //! Movelist stack-array capacity: 256 slots (max legal moves in any
 //! position is < 256; 256 keeps the array power-of-two).
 
+/// 96-byte position: occupancy bitboards plus packed state plus a cached hash.
+///
+/// See the module docs for the exact layout. `hash` is a cache: it is set at
+/// construction and goes stale across [`make`](crate::movegen::make)/[`unmake`](crate::movegen::unmake),
+/// so refresh it with [`board_hash`] before trusting the field.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Board {
+    /// Piece and colour bitboards (module table: 0–5 piece types both colours,
+    /// 6 white, 7 black, 8 all occupied); bit `n` = square `n` (a1 = 0 … h8 = 63).
     pub occupancies: [u64; 9],
+    /// Packed game state: `state[0]` holds side-to-move, castling rights,
+    /// en-passant square, and halfmove clock (module table); `state[1]` is
+    /// reserved and must be zero.
     pub state: [u64; 2],
     /// Cached Zobrist key (see module docs). Set at construction; callers
     /// recompute with [`board_hash`] after make/unmake (frozen, no
@@ -93,14 +103,25 @@ pub struct Board {
     pub hash: u64,
 }
 
+/// Opaque caller-stack undo token: the record [`make`](crate::movegen::make)
+/// returns and [`unmake`](crate::movegen::unmake) consumes.
+///
+/// Contents are defined by movegen's packing table; treat as opaque and pass
+/// back unchanged.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct StateInfo {
+    /// Raw undo words (movegen-defined packing); pass back to
+    /// [`unmake`](crate::movegen::unmake) unchanged.
     pub data: [u64; 8],
 }
 
+/// 16-bit move token; encoding is owned by movegen (see its module docs for
+/// the bit layout: from/to squares, promotion piece, special flag).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Move(pub u16);
 
+/// Movelist stack-array capacity: 256 slots (every legal position holds
+/// fewer; 256 keeps the array power-of-two).
 pub const MOVELIST_CAP: usize = 256;
 
 // Compile-time layout pins (fail the build, not the test run).

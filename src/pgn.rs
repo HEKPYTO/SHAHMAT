@@ -49,26 +49,44 @@ pub struct PgnGame {
 pub enum PgnError {
     /// A `[Tag "value"]` line is malformed (not closed, nameless, or the
     /// value is not double-quoted).
-    BadTag { game: usize, detail: String },
-    /// The `FEN` tag does not parse (`detail` is the [`FenError`] text).
-    BadFen {
+    BadTag {
+        /// 1-based game index in the file.
         game: usize,
+        /// What was wrong, with the offending line quoted.
+        detail: String,
+    },
+    /// The `FEN` tag does not parse (`detail` is the [`FenError`](crate::fen::FenError) text).
+    BadFen {
+        /// 1-based game index in the file.
+        game: usize,
+        /// The offending `FEN` tag value.
         fen: String,
+        /// The underlying FEN failure text.
         detail: String,
     },
     /// A `{...}` comment is never closed.
-    UnterminatedComment { game: usize },
+    UnterminatedComment {
+        /// 1-based game index in the file.
+        game: usize,
+    },
     /// A SAN token is malformed or matches no legal move.
     BadSan {
+        /// 1-based game index in the file.
         game: usize,
+        /// 1-based ply index of the token within the game.
         ply: usize,
+        /// The offending SAN token.
         token: String,
     },
     /// A SAN token matches more than one legal move.
     AmbiguousSan {
+        /// 1-based game index in the file.
         game: usize,
+        /// 1-based ply index of the token within the game.
         ply: usize,
+        /// The offending SAN token.
         token: String,
+        /// How many legal moves the token matched (always `> 1`).
         candidates: usize,
     },
 }

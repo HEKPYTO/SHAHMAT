@@ -39,15 +39,36 @@ const HALFMOVE_MAX: u32 = 16383;
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum FenError {
     /// Not exactly six whitespace-separated fields.
-    WrongFieldCount { found: usize },
+    WrongFieldCount {
+        /// How many whitespace-separated fields were found (six required).
+        found: usize,
+    },
     /// Placement field does not split into eight `/`-separated ranks.
-    BadRankCount { found: usize },
+    BadRankCount {
+        /// How many `/`-separated ranks the placement field held (eight required).
+        found: usize,
+    },
     /// A rank does not cover exactly eight squares.
-    BadRankWidth { rank: usize, squares: u32 },
+    BadRankWidth {
+        /// Rank number `8..=1` for messages (8 = rank 8 … 1 = rank 1).
+        rank: usize,
+        /// Squares covered by the rank (eight required).
+        squares: u32,
+    },
     /// `0`, `9`, or other non-placement digit in a rank.
-    BadDigit { rank: usize, ch: char },
+    BadDigit {
+        /// Rank number `8..=1` holding the digit.
+        rank: usize,
+        /// The offending character.
+        ch: char,
+    },
     /// Letter that is not one of `pnbrqkPNBRQK`.
-    UnknownPiece { rank: usize, ch: char },
+    UnknownPiece {
+        /// Rank number `8..=1` holding the letter.
+        rank: usize,
+        /// The offending character.
+        ch: char,
+    },
     /// Side field is not `w` or `b`.
     BadSideToMove(String),
     /// Castling field is not `-` or 1–4 distinct `KQkq` letters.

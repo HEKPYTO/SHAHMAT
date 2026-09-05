@@ -1,6 +1,6 @@
 //! Usable game API (core subset).
 //!
-//! [`Game`] owns a [`Board`](crate::board::Board) plus the per-ply history
+//! [`Game`] owns a [`Board`] plus the per-ply history
 //! needed for [`Game::undo`], a header map, and the initial FEN. Load a FEN
 //! or the startpos, then play through games with [`Game::push_san`] or
 //! [`Game::push_uci`], query legal moves as SAN
@@ -14,7 +14,7 @@
 //!   is checkmate or stalemate only, and [`Game::to_pgn`] always ends `*`.
 //! - No board editing: no piece placement, removal, or clearing, no loading
 //!   moves into an arbitrary position. Games start from
-//!   [`STARTPOS`](crate::fen::STARTPOS) or a FEN via [`Game::from_fen`]/
+//!   [`STARTPOS`] or a FEN via [`Game::from_fen`]/
 //!   [`Game::load_fen`] only.
 //! - Move numbering in [`Game::to_pgn`] always starts at 1 (fullmove is not
 //!   stored by FEN render, which always emits `1`).

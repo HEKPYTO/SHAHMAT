@@ -59,6 +59,15 @@ x86-64 and Graviton numbers are unmeasured — the Dockerfile tunes per arch
   health-checked compose service capped at 4 CPUs / 1 GiB.
 - `.github/` — CI gate (fmt, clippy, tests, exact d6, image smoke + size cap).
 
+## Docs
+
+Library usage, the module/feature reference (incl. `nif`, WASM export,
+`MAX_DEPTH`, `--jobs` SMP), and the dev workflow (build/test/lint/doc
+commands, feature combos, zero-dep + no-alloc rules, error conventions)
+live in [`src/README.md`](src/README.md) — the single source of truth.
+Integration-test coverage and how to run it are in
+[`tests/README.md`](tests/README.md).
+
 ## License
 
 Apache-2.0 — see `LICENSE`.
