@@ -1,13 +1,15 @@
 # SHAHMAT CI — Phase 3 trusted gates.
 #
-# gate: native single-arch build+test+perft+image smoke, runs on PRs and tags.
-# release: amd64+arm64 buildx push to GHCR on `v*` tags only, after gate.
-# Push/registry steps exist ONLY in the tag-gated release job — never on PR.
+# gate: native single-arch build+test+perft+image smoke, runs on PRs, branch
+# pushes, and tags. release: amd64+arm64 buildx push to GHCR on `v*` tags
+# only, after gate. Push/registry steps exist ONLY in the tag-gated release
+# job — never on PR or branch push.
 name: ci
 
 on:
   pull_request:
   push:
+    branches: ["main"]
     tags: ["v*"]
 
 permissions:
