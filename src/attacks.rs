@@ -17,7 +17,7 @@
 //!   min-mem`. Enabling both does not yield a single resident set.
 //!
 //! This phase wires the selection function + slow-list predicate and their
-//! unit tests. The table sets land in this file later behind the same codes.
+//! unit tests. The table sets land in this file later behind the same engine selection.
 
 // `min-mem` (HQ-only 2 KB) and `pext` (~843 KB) each name a different resident
 // set; a binary combining them could not keep the single-resident promise.
@@ -82,18 +82,34 @@ pub fn bmi2_is_slow(vendor: CpuVendor, family: u32, model: u32) -> bool {
     }
 }
 
-/// x86_64 path selection (SPEC §4): BMI2 present AND not slow → PEXT, else the
-/// single fallback resident (`avx2_dual_hq` iff AVX2, else `black_magic`).
+/// Resident slider engine (SPEC §4): exactly one large table set per binary.
 ///
-/// Pure over injected flags: host-independent. The table sets land in this
-/// file later; callers match on the returned code.
-pub fn select_x86_64_path(bmi2: bool, slow_bmi2: bool, avx2: bool) -> &'static str {
+/// Matched ONCE per dispatch site — exhaustively, so a typo can never
+/// silently fall through to a wrong engine the way string codes could.
+/// - `Hq` ..... hyperbola quintessence + `rbit` (2 KiB line tables).
+/// - `Black` . Black fixed-shift magic (~863 KB measured).
+/// - `Pext` .. x86_64 BMI2 gather (~842 KB measured).
+/// - `Avx2Hq`  AVX2-present fallback: runs on the HQ core below (shared 2 KiB
+///   line masks; the AVX2-vectorised form is a later perf opportunity,
+///   results are identical).
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Engine {
+    Hq,
+    Black,
+    Pext,
+    Avx2Hq,
+}
+/// x86_64 path selection (SPEC §4): BMI2 present AND not slow → PEXT, else the
+/// single fallback resident (`Avx2Hq` iff AVX2, else `Black`).
+///
+/// Pure over injected flags: host-independent.
+pub fn select_engine(bmi2: bool, slow_bmi2: bool, avx2: bool) -> Engine {
     if bmi2 && !slow_bmi2 {
-        "pext"
+        Engine::Pext
     } else if avx2 {
-        "avx2_dual_hq"
+        Engine::Avx2Hq
     } else {
-        "black_magic"
+        Engine::Black
     }
 }
 
@@ -113,23 +129,23 @@ fn cpu_is_slow_bmi2() -> bool {
 }
 
 #[cfg(target_arch = "aarch64")]
-pub fn slider_kind() -> &'static str {
-    "hq_rbit"
+pub fn engine() -> Engine {
+    Engine::Hq
 }
 
 #[cfg(all(target_arch = "wasm32", feature = "min-mem"))]
-pub fn slider_kind() -> &'static str {
-    "hq_rbit"
+pub fn engine() -> Engine {
+    Engine::Hq
 }
 
 #[cfg(all(target_arch = "wasm32", not(feature = "min-mem")))]
-pub fn slider_kind() -> &'static str {
-    "black_magic"
+pub fn engine() -> Engine {
+    Engine::Black
 }
 
 #[cfg(all(target_arch = "x86_64", not(feature = "pext"), feature = "min-mem"))]
-pub fn slider_kind() -> &'static str {
-    "hq_rbit"
+pub fn engine() -> Engine {
+    Engine::Hq
 }
 
 #[cfg(all(
@@ -137,33 +153,30 @@ pub fn slider_kind() -> &'static str {
     not(feature = "pext"),
     not(feature = "min-mem")
 ))]
-pub fn slider_kind() -> &'static str {
-    "black_magic"
+pub fn engine() -> Engine {
+    Engine::Black
 }
 #[cfg(all(target_arch = "x86_64", feature = "pext", not(feature = "min-mem")))]
-pub fn slider_kind() -> &'static str {
-    #[cfg(feature = "pext")]
-    {
-        select_x86_64_path(
-            std::arch::is_x86_feature_detected!("bmi2"),
-            cpu_is_slow_bmi2(),
-            std::arch::is_x86_feature_detected!("avx2"),
-        )
-    }
+pub fn engine() -> Engine {
+    select_engine(
+        std::arch::is_x86_feature_detected!("bmi2"),
+        cpu_is_slow_bmi2(),
+        std::arch::is_x86_feature_detected!("avx2"),
+    )
 }
 
 // ================================================================
 // Phase 1 tables: real slider attacks behind the selection fns.
 //
 // Resident-set contract (exactly one large set per binary; the
-// `slider_kind()` / `select_x86_64_path()` fns above pick at runtime
+// `engine()` / `select_engine()` fns above pick at runtime
 // among what is compiled in):
 // - `aarch64` or `min-mem` ........... HQ hyperbola only (2 KiB).
 // - `wasm32`, or `x86_64` w/o `pext` . Black fixed-shift magic only.
 // - `x86_64` + `pext` ................ PEXT + runtime fallback. The
-//   fallback follows `select_x86_64_path()`: `avx2_dual_hq` runs on the
+//   fallback follows `select_engine()`: `Avx2Hq` runs on the
 //   HQ core below (shared 2 KiB line masks; the AVX2-vectorised form is
-//   a later perf opportunity, results are identical), `black_magic` on
+//   a later perf opportunity, results are identical), `Black` on
 //   the Black engine. Both fallback engines are compiled in this one
 //   configuration, but their large tables live behind `LazyLock` heap
 //   storage initialised on first use, so at most one fallback's tables
@@ -701,7 +714,7 @@ mod pext {
     pub(super) fn rook_attacks(sq: u8, occ: u64) -> u64 {
         let t = &*TABLES;
         let s = sq as usize;
-        // SAFETY: called only when `cached_slider_kind()` reports `"pext"`,
+        // SAFETY: called only when `cached_engine()` reports `Engine::Pext`,
         // i.e. BMI2 present and not slow; `_pext_u64` needs BMI2, nothing else.
         let j = t.rook_off[s] as usize + unsafe { pext_index(occ, super::ROOK_MASK_TAB[s]) };
         t.rook_tbl[j]
@@ -717,11 +730,11 @@ mod pext {
     }
 }
 
-/// Cached `slider_kind()` for the `pext`-gated dispatch below (one CPUID
+/// Cached [`engine()`] for the `pext`-gated dispatch below (one CPUID
 /// sequence per process, not per call).
 #[cfg(all(target_arch = "x86_64", feature = "pext", not(feature = "min-mem")))]
-fn cached_slider_kind() -> &'static str {
-    static KIND: std::sync::LazyLock<&'static str> = std::sync::LazyLock::new(slider_kind);
+fn cached_engine() -> Engine {
+    static KIND: std::sync::LazyLock<Engine> = std::sync::LazyLock::new(engine);
     *KIND
 }
 
@@ -729,7 +742,7 @@ fn cached_slider_kind() -> &'static str {
 ///
 /// Dispatches to the single resident engine: HQ on `aarch64`/`min-mem`,
 /// Black magic on `wasm32` / non-`pext` `x86_64`, and on `pext` `x86_64`
-/// to PEXT or its `select_x86_64_path` fallback. Zero heap allocation on
+/// to PEXT or its `select_engine` fallback. Zero heap allocation on
 /// the attack path (tables initialise once, on first use).
 pub fn rook_attacks(sq: u8, occ: u64) -> u64 {
     check_sq(sq);
@@ -751,10 +764,12 @@ pub fn rook_attacks(sq: u8, occ: u64) -> u64 {
     }
     #[cfg(all(target_arch = "x86_64", feature = "pext", not(feature = "min-mem")))]
     {
-        match cached_slider_kind() {
-            "pext" => pext::rook_attacks(sq, occ),
-            "avx2_dual_hq" => hq::rook_attacks(sq, occ),
-            _ => black::rook_attacks(sq, occ),
+        match cached_engine() {
+            Engine::Pext => pext::rook_attacks(sq, occ),
+            Engine::Black => black::rook_attacks(sq, occ),
+            // `Avx2Hq` runs on the HQ core (identical results); `Hq` is
+            // unreachable on this config but keeps the match total.
+            Engine::Avx2Hq | Engine::Hq => hq::rook_attacks(sq, occ),
         }
     }
 }
@@ -782,10 +797,12 @@ pub fn bishop_attacks(sq: u8, occ: u64) -> u64 {
     }
     #[cfg(all(target_arch = "x86_64", feature = "pext", not(feature = "min-mem")))]
     {
-        match cached_slider_kind() {
-            "pext" => pext::bishop_attacks(sq, occ),
-            "avx2_dual_hq" => hq::bishop_attacks(sq, occ),
-            _ => black::bishop_attacks(sq, occ),
+        match cached_engine() {
+            Engine::Pext => pext::bishop_attacks(sq, occ),
+            Engine::Black => black::bishop_attacks(sq, occ),
+            // `Avx2Hq` runs on the HQ core (identical results); `Hq` is
+            // unreachable on this config but keeps the match total.
+            Engine::Avx2Hq | Engine::Hq => hq::bishop_attacks(sq, occ),
         }
     }
 }
@@ -864,38 +881,38 @@ mod tests {
 
     #[test]
     fn select_fast_bmi2_is_pext() {
-        assert_eq!(select_x86_64_path(true, false, false), "pext");
-        assert_eq!(select_x86_64_path(true, false, true), "pext");
+        assert_eq!(select_engine(true, false, false), Engine::Pext);
+        assert_eq!(select_engine(true, false, true), Engine::Pext);
     }
 
     #[test]
     fn select_slow_bmi2_falls_back_by_avx2() {
-        assert_eq!(select_x86_64_path(true, true, true), "avx2_dual_hq");
-        assert_eq!(select_x86_64_path(true, true, false), "black_magic");
+        assert_eq!(select_engine(true, true, true), Engine::Avx2Hq);
+        assert_eq!(select_engine(true, true, false), Engine::Black);
     }
 
     #[test]
     fn select_no_bmi2_falls_back_by_avx2() {
-        assert_eq!(select_x86_64_path(false, false, true), "avx2_dual_hq");
-        assert_eq!(select_x86_64_path(false, false, false), "black_magic");
+        assert_eq!(select_engine(false, false, true), Engine::Avx2Hq);
+        assert_eq!(select_engine(false, false, false), Engine::Black);
     }
 
     #[test]
     #[cfg(target_arch = "aarch64")]
-    fn aarch64_is_hq_rbit() {
-        assert_eq!(slider_kind(), "hq_rbit");
+    fn aarch64_is_hq() {
+        assert_eq!(engine(), Engine::Hq);
     }
 
     #[test]
     #[cfg(target_arch = "wasm32")]
-    fn wasm32_is_black_magic() {
-        assert_eq!(slider_kind(), "black_magic");
+    fn wasm32_is_black() {
+        assert_eq!(engine(), Engine::Black);
     }
 
     #[test]
     #[cfg(all(target_arch = "x86_64", not(feature = "pext")))]
     fn non_pext_build_is_black_only() {
-        assert_eq!(slider_kind(), "black_magic");
+        assert_eq!(engine(), Engine::Black);
     }
     // ---- Phase 1 tables: correctness vs an independent oracle ----
 
@@ -1122,7 +1139,7 @@ mod tests {
         }
         #[cfg(all(target_arch = "x86_64", feature = "pext", not(feature = "min-mem")))]
         {
-            if super::cached_slider_kind() == "pext" {
+            if super::cached_engine() == Engine::Pext {
                 let _ = super::rook_attacks(0, 0);
                 let t = &*super::pext::TABLES;
                 assert_eq!(std::mem::size_of_val(&*t.rook_tbl), 102_400 * 8);

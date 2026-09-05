@@ -9,6 +9,10 @@ license = "Apache-2.0"
 name = "shahmat-svc"
 path = "src/main.rs"
 
+[lib]
+name = "shahmat"
+crate-type = ["cdylib", "rlib"]
+
 [features]
 default = ["magic-black"]
 magic-black = []

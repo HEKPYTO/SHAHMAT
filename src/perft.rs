@@ -313,3 +313,17 @@ fn push_sq(s: &mut String, sq: u8) {
     s.push((b'a' + sq % 8) as char);
     s.push((b'1' + sq / 8) as char);
 }
+
+/// WASM entry: bulk perft on the start position. `wasm32-unknown-unknown`
+/// has no argv/stdio, so in-node measurement calls this export directly
+/// (0 on the impossible parse failure — never panics across FFI).
+#[cfg(target_arch = "wasm32")]
+#[no_mangle]
+pub extern "C" fn shahmat_perft_bulk_startpos(depth: u32) -> u64 {
+    use crate::fen::{parse, STARTPOS};
+    let board = match parse(STARTPOS) {
+        Ok(b) => b,
+        Err(_) => return 0,
+    };
+    perft_bulk(&board, depth.min(MAX_DEPTH))
+}
