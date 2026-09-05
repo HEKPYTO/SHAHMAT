@@ -1,0 +1,23 @@
+# Pre-commit: fast static gates only (lint + typecheck). No tests here —
+# `cargo test` stays in CI so commits stay instant.
+repos:
+  - repo: local
+    hooks:
+      - id: fmt
+        name: cargo fmt --check
+        entry: cargo fmt --all -- --check
+        language: system
+        types: [rust]
+        pass_filenames: false
+      - id: clippy
+        name: cargo clippy -D warnings
+        entry: bash -c 'cargo clippy --locked --all-targets -- -D warnings'
+        language: system
+        types: [rust]
+        pass_filenames: false
+      - id: check
+        name: cargo check (typecheck)
+        entry: bash -c 'cargo check --locked --all-targets'
+        language: system
+        types: [rust]
+        pass_filenames: false
