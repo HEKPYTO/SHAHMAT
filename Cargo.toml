@@ -1,0 +1,22 @@
+[package]
+name = "shahmat"
+version = "0.1.0"
+edition = "2021"
+description = "No-rules movegen-correct chess lib, fastest plus least-memory per platform"
+license = "MIT"
+
+[[bin]]
+name = "shahmat-svc"
+path = "src/main.rs"
+
+[features]
+default = ["magic-black"]
+magic-black = []
+min-mem = []
+pext = []
+
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "debuginfo"
