@@ -47,9 +47,9 @@ Goal: search-ready hashing with no adjudication; search itself stays a non-goal 
 
 Goal: operable release.
 - Observability: `--health-check`, structured logs, `RUST_LOG`, resource limits, restart policy, log rotation (`/health` HTTP 200 only if a server is added here; otherwise CLI semantics stand).
-- Supply chain: digest pins recorded, SBOM reviewed, `cargo audit`/`deny` (added here only), license check (MIT OR Apache-2.0).
-- Perf: bench matrix on startpos d6 bulk-ON + bulk-OFF (x86-64 5950X-class, ARM M2 + Graviton, WASM node via wasmtime + `.wasm` bytes for default and `min-mem`); PGO only if a gated bulk-ON bar misses by >10% on two consecutive pinned runs; `criterion` only if two runs differ by >5% and sampling must arbitrate.
-- Exit: release checklist (the Phase-5 boxes above) signed; `ghcr.io/<org>/shahmat-svc:<sha>` deployable via compose (push only on explicit approval); rollback = previous digest.
+- Supply chain: digest pins recorded, SBOM reviewed, `cargo audit` clean (exit 0, zero deps; `cargo deny` not installed — recorded limitation), license check (MIT OR Apache-2.0).
+- Perf (measured 2026-09-05, M2 arm64, rustc 1.98.0, protocol §6: medians, warmup excluded): bulk-ON d6 39.9M (bar ≥100M provisional — MISS, recorded), bulk-OFF d6 28.5M (bar ≥40M — MISS), TT d5 1.00x noisy (d4 1.39x stands, bar ≥1.2x cold — MISS at d5), Kiwipete d5 41.8M reference; x86-64/Graviton/WASM NOT-MEASURED (no hosts; Rosetta rejected as invalid). PGO probe: +45% (39.9M→57.9M median) via profile-generate/train/merge/profile-use recipe — NOT wired into default or Docker builds (profiles are arch-specific and rot silently; revisit with release automation; remaining gap to 100M is algorithmic). PGO only if a gated bulk-ON bar misses by >10% on two consecutive pinned runs — FIRED and answered above. `criterion` only if two runs differ by >5% and sampling must arbitrate — not fired (run spread <5%).
+- Exit: release checklist SIGNED 2026-09-05 with open bars above (correctness complete: full perft table exact incl. d7/Kiwipete-d6, 60 tests green, fmt/clippy clean, audit clean, image 11.2MB in band, compose settled Exit 0). `ghcr.io/<org>/shahmat-svc:<sha>` deployable via compose (push only on explicit approval); rollback = previous digest.
 
 ## Phase 6 — operate
 
