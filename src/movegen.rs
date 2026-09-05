@@ -201,37 +201,104 @@ fn piece_bb(b: &Board, white: bool, piece: usize) -> u64 {
 }
 
 // ---------------------------------------------------------------------------
-// Leap attacks (computed from coordinates; no tables, no wrap bugs).
+// Leap attacks (precomputed tables; `leap` stays as the test-only oracle).
 // ---------------------------------------------------------------------------
 
+const KNIGHT_D: [(i8, i8); 8] = [
+    (1, 2),
+    (2, 1),
+    (2, -1),
+    (1, -2),
+    (-1, -2),
+    (-2, -1),
+    (-2, 1),
+    (-1, 2),
+];
+
+const KING_D: [(i8, i8); 8] = [
+    (1, 1),
+    (1, 0),
+    (1, -1),
+    (0, -1),
+    (-1, -1),
+    (-1, 0),
+    (-1, 1),
+    (0, 1),
+];
+
+const fn build_leap(d: &[(i8, i8); 8]) -> [u64; 64] {
+    let mut t = [0u64; 64];
+    let mut sq: u8 = 0;
+    while sq < 64 {
+        let f = (sq & 7) as i8;
+        let r = (sq >> 3) as i8;
+        let mut m = 0u64;
+        let mut i = 0;
+        while i < 8 {
+            let nf = f + d[i].0;
+            let nr = r + d[i].1;
+            if nf >= 0 && nf < 8 && nr >= 0 && nr < 8 {
+                m |= 1u64 << (nr as u8 * 8 + nf as u8);
+            }
+            i += 1;
+        }
+        t[sq as usize] = m;
+        sq += 1;
+    }
+    t
+}
+
+/// Knight attacks per square (1 KiB total with `KING_TAB`, L1-resident).
+static KNIGHT_TAB: [u64; 64] = build_leap(&KNIGHT_D);
+/// King attacks per square.
+static KING_TAB: [u64; 64] = build_leap(&KING_D);
+
+/// Pawn attacker squares per target: `[0]` = white attackers (one rank
+/// below), `[1]` = black attackers (one rank above).
+const fn build_pawn_atk() -> [[u64; 64]; 2] {
+    let mut t = [[0u64; 64]; 2];
+    let mut sq: u8 = 0;
+    while sq < 64 {
+        let f = sq & 7;
+        let r = sq >> 3;
+        let mut w = 0u64;
+        let mut bl = 0u64;
+        if r > 0 {
+            if f > 0 {
+                w |= 1u64 << (sq - 9);
+            }
+            if f < 7 {
+                w |= 1u64 << (sq - 7);
+            }
+        }
+        if r < 7 {
+            if f > 0 {
+                bl |= 1u64 << (sq + 7);
+            }
+            if f < 7 {
+                bl |= 1u64 << (sq + 9);
+            }
+        }
+        t[0][sq as usize] = w;
+        t[1][sq as usize] = bl;
+        sq += 1;
+    }
+    t
+}
+
+static PAWN_ATK: [[u64; 64]; 2] = build_pawn_atk();
+
+#[inline]
 fn knight_attacks(sq: u8) -> u64 {
-    const D: [(i8, i8); 8] = [
-        (1, 2),
-        (2, 1),
-        (2, -1),
-        (1, -2),
-        (-1, -2),
-        (-2, -1),
-        (-2, 1),
-        (-1, 2),
-    ];
-    leap(sq, &D)
+    KNIGHT_TAB[sq as usize]
 }
 
+#[inline]
 fn king_attacks(sq: u8) -> u64 {
-    const D: [(i8, i8); 8] = [
-        (1, 1),
-        (1, 0),
-        (1, -1),
-        (0, -1),
-        (-1, -1),
-        (-1, 0),
-        (-1, 1),
-        (0, 1),
-    ];
-    leap(sq, &D)
+    KING_TAB[sq as usize]
 }
 
+#[cfg(test)]
 fn leap(sq: u8, deltas: &[(i8, i8)]) -> u64 {
     let f = (sq & 7) as i8;
     let r = (sq >> 3) as i8;
@@ -252,35 +319,12 @@ fn leap(sq: u8, deltas: &[(i8, i8)]) -> u64 {
 
 /// True if `sq` is attacked by side `by_white`.
 pub fn is_attacked(b: &Board, sq: u8, by_white: bool) -> bool {
-    let f = sq & 7;
-    let r = sq >> 3;
     let own = colour_bb(b, by_white);
 
-    // Pawns: a white attacker sits one rank below `sq`, black one above.
-    if by_white {
-        if r > 0 {
-            let mut src = 0u64;
-            if f > 0 {
-                src |= 1u64 << (sq - 9);
-            }
-            if f < 7 {
-                src |= 1u64 << (sq - 7);
-            }
-            if b.occupancies[PAWN] & own & src != 0 {
-                return true;
-            }
-        }
-    } else if r < 7 {
-        let mut src = 0u64;
-        if f > 0 {
-            src |= 1u64 << (sq + 7);
-        }
-        if f < 7 {
-            src |= 1u64 << (sq + 9);
-        }
-        if b.occupancies[PAWN] & own & src != 0 {
-            return true;
-        }
+    // Pawns: attacker squares precomputed per target (rank-edge aware).
+    let atk = PAWN_ATK[if by_white { 0 } else { 1 }][sq as usize];
+    if b.occupancies[PAWN] & own & atk != 0 {
+        return true;
     }
 
     let occ = b.occupancies[OCC];
@@ -529,12 +573,35 @@ fn gen_castling(b: &Board, white: bool, occ: u64, list: &mut MoveList) {
 }
 
 // ---------------------------------------------------------------------------
-// Legal generation (make-test-unmake filter).
+// Legal generation (single-pass fast path + exact filter fallback).
 // ---------------------------------------------------------------------------
 
 /// Fill `list` with fully legal moves for the side to move.
+///
+/// Fast path: when the mover is not in check and no own piece is pinned,
+/// every non-king non-EP pseudo move is legal by construction — it cannot
+/// expose its own king (nothing pinned) and there is no check to escape.
+/// Those moves skip make/unmake/`is_attacked` entirely. King moves (castles
+/// included) and EP captures (both-pawns-leave edge) keep one make-test
+/// each. Any check, pin, pin uncertainty, or missing king falls back to the
+/// exact per-move filter, so totals match it by construction.
 pub fn generate_legal(b: &mut Board, list: &mut MoveList) {
     let white = stm_white(b);
+    let king_bb = piece_bb(b, white, KING);
+    if king_bb != 0 && !is_in_check(b, white) {
+        let ksq = king_bb.trailing_zeros() as u8;
+        let occ = b.occupancies[OCC];
+        let own = colour_bb(b, white);
+        let (pinned, uncertain) = pinned_mask(b, ksq, occ, own, colour_bb(b, !white));
+        if !uncertain && pinned == 0 {
+            return generate_legal_fast(b, list, white, king_bb, occ);
+        }
+    }
+    generate_legal_filter(b, list, white);
+}
+
+/// Exact per-move make-test-unmake filter (slow path and check/pin fallback).
+fn generate_legal_filter(b: &mut Board, list: &mut MoveList, white: bool) {
     let mut pseudo = MoveList::new();
     gen_for(b, white, &mut pseudo);
     for i in 0..pseudo.len {
@@ -545,6 +612,100 @@ pub fn generate_legal(b: &mut Board, list: &mut MoveList) {
         }
         unmake(b, undo, mv);
     }
+}
+
+/// 0-check + 0-pin accept loop: non-king non-EP moves skip the legality test.
+fn generate_legal_fast(b: &mut Board, list: &mut MoveList, white: bool, king_bb: u64, occ: u64) {
+    let mut pseudo = MoveList::new();
+    gen_for(b, white, &mut pseudo);
+    for i in 0..pseudo.len {
+        let mv = pseudo.moves[i];
+        let from = mv.from();
+        if (king_bb >> from) & 1 == 1 || is_ep_capture(b, mv, from, occ) {
+            let undo = make(b, mv);
+            if !is_in_check(b, white) {
+                list.push(mv);
+            }
+            unmake(b, undo, mv);
+        } else {
+            list.push(mv);
+        }
+    }
+}
+
+/// True for an EP-capture token: special-flagged pawn diagonal to an empty
+/// square. Double pushes share the flag but stay on-file; castles move the
+/// king and never reach this test (king branch first).
+#[inline]
+fn is_ep_capture(b: &Board, mv: Move, from: u8, occ: u64) -> bool {
+    let to = mv.to();
+    mv.is_special()
+        && (b.occupancies[PAWN] >> from) & 1 == 1
+        && (from & 7) != (to & 7)
+        && (occ >> to) & 1 == 0
+}
+
+/// Own pieces pinned to the own king on `ksq`, plus an uncertainty flag.
+///
+/// X-ray method: enemy sliders aligned with the king once own pieces are
+/// removed are snipers; the occupancy strictly between king and sniper is
+/// walked square by square. Exactly one bit, and it is own, means a pin —
+/// every other shape (empty, lone enemy blocker, two blockers) is exactly
+/// "no pin on this ray", so the walk never guesses. `uncertain` fires only
+/// for the unreachable empty-between shape (which would be a direct check,
+/// contradicting the 0-check precondition) and routes to the exact filter.
+fn pinned_mask(b: &Board, ksq: u8, occ: u64, own: u64, foe: u64) -> (u64, bool) {
+    let occ_x = (occ & !own) | (1u64 << ksq);
+    let foe_diag = (b.occupancies[BISHOP] | b.occupancies[QUEEN]) & foe;
+    let foe_orth = (b.occupancies[ROOK] | b.occupancies[QUEEN]) & foe;
+    let mut pinned = 0u64;
+    let mut uncertain = false;
+    let mut diag = foe_diag & bishop_attacks(ksq, occ_x);
+    while diag != 0 {
+        let s = diag.trailing_zeros() as u8;
+        diag &= diag - 1;
+        let (between, empty) = walk_between(ksq, s, occ);
+        if empty {
+            uncertain = true;
+        } else if between.count_ones() == 1 {
+            pinned |= between & own;
+        }
+    }
+    let mut orth = foe_orth & rook_attacks(ksq, occ_x);
+    while orth != 0 {
+        let s = orth.trailing_zeros() as u8;
+        orth &= orth - 1;
+        let (between, empty) = walk_between(ksq, s, occ);
+        if empty {
+            uncertain = true;
+        } else if between.count_ones() == 1 {
+            pinned |= between & own;
+        }
+    }
+    (pinned, uncertain)
+}
+
+/// Occupancy strictly between squares `a` and `b` (aligned by construction:
+/// `b` comes from a slider attack set centred on `a`). Returns the bitboard
+/// plus whether it is empty.
+fn walk_between(a: u8, b: u8, occ: u64) -> (u64, bool) {
+    let (af, ar) = ((a & 7) as i8, (a >> 3) as i8);
+    let (bf, br) = ((b & 7) as i8, (b >> 3) as i8);
+    let step_f = (bf - af).signum();
+    let step_r = (br - ar).signum();
+    let mut between = 0u64;
+    let mut f = af + step_f;
+    let mut r = ar + step_r;
+    // Aligned by construction, so this reaches `(bf, br)` in ≤ 7 steps.
+    while f != bf || r != br {
+        let sq = (r * 8 + f) as u8;
+        if (occ >> sq) & 1 == 1 {
+            between |= 1u64 << sq;
+        }
+        f += step_f;
+        r += step_r;
+    }
+    (between, between == 0)
 }
 
 /// True if side `white` has at least one legal move (early exit; for E8/E9).
@@ -785,6 +946,90 @@ mod tests {
         list.as_slice()
             .iter()
             .any(|m| m.from() == from && m.to() == to)
+    }
+    #[test]
+    fn leap_tables_match_oracle() {
+        for sq in 0..64u8 {
+            assert_eq!(KNIGHT_TAB[sq as usize], leap(sq, &KNIGHT_D), "knight {sq}");
+            assert_eq!(KING_TAB[sq as usize], leap(sq, &KING_D), "king {sq}");
+            let f = sq & 7;
+            let r = sq >> 3;
+            let mut w = 0u64;
+            let mut bl = 0u64;
+            if r > 0 {
+                if f > 0 {
+                    w |= 1u64 << (sq - 9);
+                }
+                if f < 7 {
+                    w |= 1u64 << (sq - 7);
+                }
+            }
+            if r < 7 {
+                if f > 0 {
+                    bl |= 1u64 << (sq + 7);
+                }
+                if f < 7 {
+                    bl |= 1u64 << (sq + 9);
+                }
+            }
+            assert_eq!(PAWN_ATK[0][sq as usize], w, "white pawn {sq}");
+            assert_eq!(PAWN_ATK[1][sq as usize], bl, "black pawn {sq}");
+        }
+    }
+    /// Fast path must agree with the exact filter on every node of tactical
+    /// trees (checks, pins, EP, castles, promos): sorted token sets compared
+    /// recursively, so any divergence fails exactly where it appears.
+    #[test]
+    fn fast_path_matches_filter_everywhere() {
+        let cases: [(&str, u32); 6] = [
+            (STARTPOS, 3),
+            (
+                "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+                3,
+            ),
+            (
+                "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
+                2,
+            ),
+            (
+                "rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3",
+                2,
+            ),
+            (
+                "rnbqkbnr/pp1ppppp/8/8/3pP3/8/PPP2PPP/RNBQKBNR b KQkq d3 0 3",
+                2,
+            ),
+            (
+                "r1bqkbnr/pppp1Qpp/2n5/4p3/2B1P3/8/PPPP1PPP/RNB1K1NR b KQkq - 0 3",
+                2,
+            ),
+        ];
+        for (fen, depth) in cases {
+            let b = parse(fen).expect("differential FEN must parse");
+            diff_node(&b, depth, fen);
+        }
+    }
+
+    fn diff_node(b: &Board, depth: u32, fen: &str) {
+        let mut live = *b;
+        let mut fast = MoveList::new();
+        generate_legal(&mut live, &mut fast);
+        let mut ref_board = *b;
+        let white = stm_white(&ref_board);
+        let mut slow = MoveList::new();
+        generate_legal_filter(&mut ref_board, &mut slow, white);
+        let mut fa: Vec<u16> = fast.as_slice().iter().map(|m| m.0).collect();
+        let mut sl: Vec<u16> = slow.as_slice().iter().map(|m| m.0).collect();
+        fa.sort_unstable();
+        sl.sort_unstable();
+        assert_eq!(fa, sl, "fast/filter mismatch at {fen}");
+        if depth > 0 {
+            for m in fast.as_slice() {
+                let mut child = live;
+                make(&mut child, *m);
+                diff_node(&child, depth - 1, fen);
+            }
+        }
     }
 
     #[test]
