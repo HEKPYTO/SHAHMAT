@@ -25,6 +25,7 @@ src/board.rs          # Board 88B + StateInfo (no hash, no PackedBoard in v1)
 src/attacks.rs        # 3 arms: aarch64 hq_rbit / wasm32 black_magic / x86_64 pext-or-magic; owns CPUID table
 src/movegen.rs        # gen + filter + make/unmake, preallocated movelist
 src/fen.rs            # FEN parse/render only (no PGN/Zobrist/repetition in v1 code)
+src/pgn.rs            # PGN/SAN loader (Phase 4; extracted from fen.rs)
 src/perft.rs          # perft_full + perft_bulk (bulk at depth==1) + divide
 src/main.rs           # svc: --health-check (exit 0) + perft CLI; builds binary shahmat-svc
 examples/perft.rs     # gate harness (bulk default, --no-bulk, --divide)
@@ -45,7 +46,7 @@ Deferred with triggers: `shahmat_nif` (Elixir caller exists); `no_std` split (em
 - Slider dispatch (`cfg_select!`, exactly one resident table set per binary):
   - `aarch64` → HQ + rbit (2KB). No runtime dispatch (`rbit` is base-A64).
   - `wasm32` → Black fixed-shift magic (~863KB measured). `min-mem` → HQ-only 2KB.
-  - `x86_64` → `pext` feature + runtime CPUID (BMI2 present AND vendor-model not in the slow list: znver1/znver2/bdver4, via `std::arch`, unit-tested incl. Zen1/Zen2/Excavator/Haswell/Zen3) → PEXT (~842KB measured); else exactly one of Black magic (~863KB) or AVX2 Dual-HQ by named CPU predicate — never both resident.
+  - `x86_64` → `pext` feature + runtime CPUID (BMI2 present AND vendor-model not in the slow list: znver1/znver2/bdver4, via `std::arch`, unit-tested incl. Zen1/Zen2/Excavator/Haswell/Zen3) → PEXT (~842KB measured); else exactly one of Black magic (~863KB) or AVX2 Dual-HQ by named CPU predicate — never both resident. (`avx2_dual_hq` runs on the scalar HQ core; vector form deferred, results identical.)
 - Pseudo-legal gen + legality filter (checkers/double-check exit, pin rays, see-through-king danger, capture/push masks, EP-discovered-check recheck incl. EP while in check, castling rights update + emptiness + no-in/through-check, promo generation, king-destination legality, check-evasion block rules). Staged (captures first) ready for search; exact perft runs with staging disabled and fixed divide order. Bulk at depth==1 (`moves.len()`), recurse above; Stockfish depth==2 numbers are not directly comparable — every cited external number carries its convention label. Divide per-move at root.
 
 ## 5. Correctness gates (perft table + movegen-legality edges E1-E9)

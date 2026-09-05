@@ -117,8 +117,9 @@ const _: () = assert!(MOVELIST_CAP == 256);
 /// reproducible hashes; changing this constant re-keys every position.
 pub const ZOBRIST_SEED: u64 = 0x9E37_79B9_7F4A_7C15;
 
-/// En-passant "none" sentinel: xors nothing (matches `state[0]` bits 5–11).
-pub const ZOBRIST_EP_NONE: u8 = 64;
+/// Canonical en-passant "none" sentinel (sole definition; fen/movegen import
+/// this): xors nothing in the hash and compares equal to "no square".
+pub const EP_NONE: u8 = 64;
 
 /// One `splitmix64` step: returns `(next_state, output)`.
 const fn splitmix64_next(state: u64) -> (u64, u64) {
@@ -211,7 +212,7 @@ pub fn board_hash(b: &Board) -> u64 {
     }
     h ^= ZOBRIST.rights[((s0 >> 1) & 0xF) as usize];
     let ep = ((s0 >> 5) & 0x7F) as usize;
-    if ep != ZOBRIST_EP_NONE as usize {
+    if ep < 64 {
         h ^= ZOBRIST.ep[ep];
     }
     h

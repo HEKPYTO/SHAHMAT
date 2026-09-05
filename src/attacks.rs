@@ -5,12 +5,12 @@
 //! - `aarch64` → HQ + `rbit` (2 KB). No runtime dispatch (`rbit` is base-A64).
 //!   The `magic-black` feature is ignored on this arch; HQ is the only
 //!   resident set.
-//! - `wasm32` → Black fixed-shift magic (~694 KB). `min-mem` builds use
+//! - `wasm32` → Black fixed-shift magic (~863 KB measured). `min-mem` builds use
 //!   `--no-default-features` for HQ-only (2 KB); see below.
 //! - `x86_64` + `pext` → runtime CPUID via [`std::arch`]: BMI2 present AND
 //!   vendor-model NOT in the slow list (`znver1`/`znver2`/`bdver4`) → PEXT
-//!   (~843 KB); else exactly one fallback resident — Black magic (~694 KB)
-//!   or AVX2 Dual-HQ — by the AVX2 CPU predicate. Never both resident.
+//!   (~842 KB measured); else exactly one fallback resident — Black magic
+//!   (~863 KB measured) or AVX2 Dual-HQ — by the AVX2 CPU predicate.
 //! - `x86_64` without `pext` → Black magic only.
 //! - `min-mem` + `magic-black` is a conflicting combination (documented, not
 //!   compiled out): HQ-only is built with `--no-default-features --features
@@ -117,17 +117,31 @@ pub fn slider_kind() -> &'static str {
     "hq_rbit"
 }
 
-#[cfg(target_arch = "wasm32")]
+#[cfg(all(target_arch = "wasm32", feature = "min-mem"))]
+pub fn slider_kind() -> &'static str {
+    "hq_rbit"
+}
+
+#[cfg(all(target_arch = "wasm32", not(feature = "min-mem")))]
 pub fn slider_kind() -> &'static str {
     "black_magic"
 }
 
-#[cfg(target_arch = "x86_64")]
+#[cfg(all(target_arch = "x86_64", not(feature = "pext"), feature = "min-mem"))]
 pub fn slider_kind() -> &'static str {
-    #[cfg(not(feature = "pext"))]
-    {
-        "black_magic"
-    }
+    "hq_rbit"
+}
+
+#[cfg(all(
+    target_arch = "x86_64",
+    not(feature = "pext"),
+    not(feature = "min-mem")
+))]
+pub fn slider_kind() -> &'static str {
+    "black_magic"
+}
+#[cfg(all(target_arch = "x86_64", feature = "pext", not(feature = "min-mem")))]
+pub fn slider_kind() -> &'static str {
     #[cfg(feature = "pext")]
     {
         select_x86_64_path(

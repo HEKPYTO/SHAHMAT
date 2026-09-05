@@ -89,10 +89,9 @@ fn tt_counts_equal_no_tt() {
     let cached = perft_tt(&b, 4, &mut tt);
     assert_eq!(cached, STARTPOS_D4, "TT-on must match TT-off exactly");
     println!(
-        "tt d4: probes={} hits={} stores={} rate={:.4}",
+        "tt d4: probes={} hits={} rate={:.4}",
         tt.probes(),
         tt.hits(),
-        tt.stores(),
         tt.hit_rate()
     );
 }

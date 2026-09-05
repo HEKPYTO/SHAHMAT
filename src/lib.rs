@@ -13,5 +13,6 @@ pub mod board;
 pub mod fen;
 pub mod movegen;
 pub mod perft;
+pub mod pgn;
 
 pub use board::{Board, Move, StateInfo};
