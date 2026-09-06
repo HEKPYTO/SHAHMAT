@@ -59,10 +59,10 @@ docker compose up --build             # same binary, containerized
 ## Benchmarking (run your own)
 
 One command (builds the image, runs startpos/kiwipete/pos4, writes a JSON
-report to `outputs/`):
+report to `outputs/`). Full protocol in `bench/README.md`:
 
 ```sh
-./bench.sh
+./bench/bench.sh
 ```
 
 Always build the exact binary first (`cargo build --release` alone may reuse a
