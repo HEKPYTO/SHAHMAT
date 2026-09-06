@@ -17,13 +17,10 @@ RUN --mount=type=cache,target=/var/cache/cargo,sharing=locked \
 # musl static targets for the Alpine dist (layer cached until the Dockerfile
 # above changes; zero C code, so rust-lld self-contained linking needs no
 # musl-tools).
-RUN rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl && rustup component add llvm-tools-preview
 # PGO: instrument → train (startpos d6 + Kiwipete d5 + pos4 d6) → merge →
 # optimized. Distinct profraw per train run so the merge blends all three
-# (same-binary %m collides). Tactics-blended corpus: +3.6% geomean over
-# SP+Kiwi (kiwi/pos4 disjoint, startpos in-noise).
-# Profiles regenerate per arch on every build (no committed .profdata, no
-# rot); +25% measured over plain release on the gated workload.
+# (same-binary %m collides).
+# Profiles regenerate per arch on every build (no committed .profdata, no rot).
 RUN --mount=type=cache,target=/app/target \
     --mount=type=cache,target=/var/cache/cargo,sharing=locked \
     export CARGO_HOME=/var/cache/cargo; \

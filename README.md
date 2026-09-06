@@ -51,7 +51,7 @@ Scope: no draws of any kind, no board editing. Details: `src/README.md`.
 ```sh
 shahmat-svc --health-check            # prints ok, exit 0
 shahmat-svc perft startpos 6          # nodes 119060324
-shahmat-svc perft startpos 6 --jobs 8 # SMP wall-clock (~0.15s on M2)
+shahmat-svc perft startpos 6 --jobs 8 # SMP wall-clock (throughput, not nps)
 shahmat-svc perft startpos 3 --divide # per-move split
 docker compose up --build             # same binary, containerized
 ```
