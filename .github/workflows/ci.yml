@@ -82,6 +82,11 @@ jobs:
           echo "image=${IMAGE_LOCAL} bytes=${BYTES} (~${MB}MB)"
           if [ "$BYTES" -gt 52428800 ]; then
             echo "::error::image exceeds 50MB (${MB}MB)"
+            exit 1
+          fi
+          if [ "$BYTES" -gt 12582912 ]; then
+            echo "::warning::image exceeds expected 12MB (${MB}MB)"
+          fi
   release:
     name: 'release (multi-arch push: latest + version tag)'
     needs: [gate]
