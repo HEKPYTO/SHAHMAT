@@ -17,7 +17,10 @@ RUN --mount=type=cache,target=/var/cache/cargo,sharing=locked \
 # above changes; zero C code, so rust-lld self-contained linking needs no
 # musl-tools).
 RUN rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl && rustup component add llvm-tools-preview
-# PGO: instrument → train (startpos d6 + Kiwipete d5) → merge → optimized.
+# PGO: instrument → train (startpos d6 + Kiwipete d5 + pos4 d6) → merge →
+# optimized. Distinct profraw per train run so the merge blends all three
+# (same-binary %m collides). Tactics-blended corpus: +3.6% geomean over
+# SP+Kiwi (kiwi/pos4 disjoint, startpos in-noise).
 # Profiles regenerate per arch on every build (no committed .profdata, no
 # rot); +25% measured over plain release on the gated workload.
 RUN --mount=type=cache,target=/app/target \
@@ -25,8 +28,9 @@ RUN --mount=type=cache,target=/app/target \
     export CARGO_HOME=/var/cache/cargo; \
     case "$TARGETARCH" in amd64) MUSL_TRIPLE="x86_64-unknown-linux-musl"; EXP_FLAGS="-C target-cpu=x86-64-v3";; arm64) MUSL_TRIPLE="aarch64-unknown-linux-musl"; EXP_FLAGS="-C target-cpu=neoverse-n1";; *) echo "unknown TARGETARCH: $TARGETARCH" >&2; exit 1;; esac; \
     RUSTFLAGS="$RUSTFLAGS $EXP_FLAGS -Cprofile-generate=/tmp/pgo" cargo build --locked --frozen --release --target "$MUSL_TRIPLE" && \
-    LLVM_PROFILE_FILE="/tmp/pgo/%m.profraw" ./target/"$MUSL_TRIPLE"/release/shahmat-svc perft startpos 6 >/dev/null && \
-    LLVM_PROFILE_FILE="/tmp/pgo/%m.profraw" ./target/"$MUSL_TRIPLE"/release/shahmat-svc perft "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1" 5 >/dev/null && \
+    LLVM_PROFILE_FILE="/tmp/pgo/sp6.profraw" ./target/"$MUSL_TRIPLE"/release/shahmat-svc perft startpos 6 >/dev/null && \
+    LLVM_PROFILE_FILE="/tmp/pgo/kiwi5.profraw" ./target/"$MUSL_TRIPLE"/release/shahmat-svc perft "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1" 5 >/dev/null && \
+    LLVM_PROFILE_FILE="/tmp/pgo/pos4d6.profraw" ./target/"$MUSL_TRIPLE"/release/shahmat-svc perft "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1" 6 >/dev/null && \
     LLVM_PROFDATA="$(find /usr/local/rustup -name llvm-profdata | head -1)" && \
     "$LLVM_PROFDATA" merge -o /tmp/pgo.profdata /tmp/pgo/ && \
     RUSTFLAGS="$RUSTFLAGS $EXP_FLAGS -Cprofile-use=/tmp/pgo.profdata" cargo build --locked --frozen --release --target "$MUSL_TRIPLE" && \
