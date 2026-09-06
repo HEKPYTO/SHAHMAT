@@ -775,7 +775,7 @@ fn generate_moves_into<S: MoveSink>(b: &Board, sink: &mut S) {
 /// emptiness, then a single shared king-square probe (both castles need
 /// it) followed by the transit probes. Same move set as `castle_short_ok`
 /// + `castle_long_ok` (test-only oracle helpers) — the e-square test is
-/// shared instead of repeated.
+///   shared instead of repeated.
 #[inline(always)]
 fn emit_castles<S: MoveSink>(b: &Board, white: bool, occ: u64, sink: &mut S) {
     if white {
