@@ -1,5 +1,6 @@
-# builder digest resolved 2026-09-05 via `docker pull rust:1.98-slim-trixie` (RepoDigest below)
-FROM rust:1.98-slim-trixie@sha256:17d1ba895198f9934c6314ec5346a0d5115372f3243390c3d731e242f35c2f27 AS build
+# Builder tracks the stable Rust minor branch (no SHA pin: upstream base
+# fixes must flow in; pin counterpart kept in CI provenance/SBOM instead).
+FROM rust:1.98-slim-trixie AS build
 WORKDIR /app
 ARG TARGETARCH
 ARG RUSTFLAGS=""
@@ -36,8 +37,8 @@ RUN --mount=type=cache,target=/app/target \
     RUSTFLAGS="$RUSTFLAGS $EXP_FLAGS -Cprofile-use=/tmp/pgo.profdata" cargo build --locked --frozen --release --target "$MUSL_TRIPLE" && \
     cp target/"$MUSL_TRIPLE"/release/shahmat-svc /out-svc
 
-# runtime digest resolved 2026-09-05 via `docker pull alpine:3.24` (RepoDigest below)
-FROM alpine:3.24@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+# Runtime tracks the stable Alpine minor branch (no SHA pin, same reason).
+FROM alpine:3.24
 COPY --from=build /out-svc /svc
 USER 65532:65532
 EXPOSE 8080
