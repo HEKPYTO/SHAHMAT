@@ -17,6 +17,7 @@ on:
 permissions:
   contents: read
 
+env:
   IMAGE_RELEASE: ghcr.io/hekpyto/shahmat
   IMAGE_LOCAL: shahmat-svc:ci
   PERFT_D6: "119060324"
