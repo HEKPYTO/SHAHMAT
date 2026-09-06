@@ -1,9 +1,11 @@
 # SHAHMAT CI — Phase 3 trusted gates.
 #
-# gate: native single-arch build+test+perft+image smoke, runs on PRs, branch
-# pushes, and tags. release: amd64+arm64 buildx push to GHCR on `v*` tags
-# only, after gate. Push/registry steps exist ONLY in the tag-gated release
-# job — never on PR or branch push.
+# gate: native single-arch build+test+perft, runs on PRs, branch pushes, and
+# tags. Docker image build + in-image smoke + size gate run on push to main
+# only (never on PRs — saves the musl/PGO image build per PR).
+# release: amd64+arm64 buildx push to GHCR on `v*` tags only, after gate.
+# Push/registry steps exist ONLY in the tag-gated release job — never on PR
+# or branch push.
 name: ci
 
 on:
@@ -61,14 +63,18 @@ jobs:
           cargo run --locked --release --bin shahmat-svc -- perft startpos 6 | tee perft-d6.log
           grep -q "nodes: ${PERFT_D6}" perft-d6.log
 
+      # Docker image steps run on push to main only (not on PRs or tags).
       - name: docker build (local, no push)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: docker build -t "${IMAGE_LOCAL}" .
 
       # In-image smoke: exec health-check must exit 0 (compose uses the same path).
       - name: smoke (/svc --health-check in-image)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: docker run --rm --entrypoint /svc "${IMAGE_LOCAL}" --health-check
 
       - name: image size (warn >12MB, fail >50MB)
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         run: |
           set -euo pipefail
           BYTES="$(docker image inspect "${IMAGE_LOCAL}" --format='{{.Size}}')"
