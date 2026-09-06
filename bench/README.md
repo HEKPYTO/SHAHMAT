@@ -5,8 +5,8 @@ No python, no jq, no frameworks.
 
 | Script | Does | Run when |
 | --- | --- | --- |
-| `bench.sh [image]` | Builds the image, times startpos d6 / kiwi d5 / pos4 d5 in-image, writes `../outputs/bench-<utc-ts>.json` + table on stdout | Measuring speed |
-| `gate.sh [binary]` | Checks 17 exact perft counts + 2 `--no-bulk` cross-checks against any `shahmat-svc` binary (default `./target/release/shahmat-svc`), exit 0/1 | Proving correctness |
+| `bench.sh [image]` | Builds the image, times startpos d6 / kiwi d5 / pos4 d5 in-image (warmup + median of 5, nodes-gated), writes `outputs/bench-<utc-ts>.json` + table on stdout | Measuring speed |
+| `gate.sh [binary]` | Checks 15 exact perft counts + 2 `--no-bulk` cross-checks + divide-row self-consistency against any `shahmat-svc` binary (default `./target/release/shahmat-svc`), exit 0/1 | Proving correctness |
 
 ## Benchmarking properly
 

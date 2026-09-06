@@ -36,7 +36,7 @@ got=$("$BIN" perft --no-bulk "$SP" 5 2>/dev/null | grep nodes | awk '{print $2}'
 [ "$got" = 4865609 ] && echo "ok   nobulk-sp-d5: $got" || { echo "FAIL nobulk-sp-d5: got $got"; fail=1; }
 got=$("$BIN" perft --no-bulk "$KIWI" 4 2>/dev/null | grep nodes | awk '{print $2}')
 [ "$got" = 4085603 ] && echo "ok   nobulk-kiwi-d4: $got" || { echo "FAIL nobulk-kiwi-d4: got $got"; fail=1; }
-# divide sums
-got=$("$BIN" perft "$SP" 3 --divide 2>/dev/null | tail -3 | head -1)
-echo "divide-sp-d3 checked via nodes above"
+# divide rows must sum to the d3 total (self-consistency of move labels)
+dsum=$("$BIN" perft "$SP" 3 --divide 2>/dev/null | awk -F': ' '/:/&&!/^nodes:/&&!/^time:/&&!/^nps:/{s+=$2} /^nodes:/{n=$2} END{print s-n}')
+[ "$dsum" = 0 ] && echo "ok   divide-sp-d3: rows sum to total" || { echo "FAIL divide-sp-d3: rows off by $dsum"; fail=1; }
 exit $fail
