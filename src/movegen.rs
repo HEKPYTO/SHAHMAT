@@ -2,25 +2,23 @@
 //!
 //! Board, attacks, and FEN are owned elsewhere; this file owns:
 //!
-//! ## `Move` bit layout (u16, little-endian view)
-//!
 //! | Bits  | Field                                      |
 //! |-------|--------------------------------------------|
 //! | 0–5   | `from` square (0 = a1 … 63 = h8)           |
 //! | 6–11  | `to` square (0 = a1 … 63 = h8)             |
-//! | 12–14 | promotion piece (0 = none, 1 = N, 2 = B, 3 = R, 4 = Q; 5–7 reserved) |
-//! | 15    | special flag (double-push, EP capture, or castle) |
+//! | 12–14 | mover (0 = P … 5 = K) on plain moves; placed piece (1 = N, 2 = B, 3 = R, 4 = Q) on promotions |
+//! | 15    | promotion flag (1 = promotion, mover implicitly pawn) |
 //!
-//! One special bit suffices because `make` disambiguates the kind from
-//! board geometry — no extra decoding table, no caller-side switch:
-//!
-//! - pawn, same file, rank jump of 2 → double push (sets the EP square).
-//! - pawn, file change, landing on an empty square → EP capture
-//!   (the victim sits one rank behind `to`, recomputed from `to` + stm).
-//! - king, file change of 2 → castle (side from the direction).
-//!
-//! Captures (non-EP) and promotions need no flag: occupancy tells `make`
-//! what was taken, the promo field tells what the pawn becomes.
+//! The mover rides in the token so `make` never probes for it: plain moves
+//! carry the moved-piece index (0–5) in bits 12–14, promotions carry the
+//! placed piece (1–4) with bit 15 set (mover implicitly pawn). This fits
+//! because the old special bit is gone — `make`/`unmake` already derive
+//! double-push, EP capture, and castle purely from mover + board geometry
+//! (pawn ±16 jump, pawn diagonal to empty, king ±2 file step), so no
+//! information is lost.
+//! `promo()` still reads 0 on plain moves and 1–4 on promotions, and
+//! `is_promotion()` still means "placed piece present" — external readers
+//! (`perft` divide labels, SAN helpers) observe no change.
 //!
 //! ## Generation order (fixed, deterministic)
 //!
@@ -120,46 +118,58 @@ const NO_CAP: u64 = 8;
 // ---------------------------------------------------------------------------
 
 impl Move {
-    /// Build a move token. `promo`: 0 = none, 1 = N, 2 = B, 3 = R, 4 = Q.
+    /// Build a move token carrying its mover. `mover`: moved-piece index
+    /// 0–5 (must be `PAWN` when `promo != 0` — promotions are pawn moves).
+    /// `promo`: 0 = none, 1 = N, 2 = B, 3 = R, 4 = Q (placed piece).
+    /// Bit 15 records promotion; double-push, EP, and castle ride without
+    /// a flag — `make`/`unmake` derive them from mover + geometry.
     #[inline]
-    pub fn new(from: u8, to: u8, promo: u8, special: bool) -> Move {
-        debug_assert!(from < 64 && to < 64 && promo < 8);
-        Move(from as u16 | ((to as u16) << 6) | ((promo as u16) << 12) | ((special as u16) << 15))
+    pub fn new(from: u8, to: u8, mover: u8, promo: u8) -> Move {
+        debug_assert!(from < 64 && to < 64 && mover < 6 && promo < 5);
+        debug_assert!(promo == 0 || mover == PAWN as u8);
+        let field = if promo == 0 { mover } else { promo };
+        Move(
+            from as u16
+                | ((to as u16) << 6)
+                | ((field as u16) << 12)
+                | (((promo != 0) as u16) << 15),
+        )
     }
-
     /// Origin square (0 = a1 … 63 = h8).
     #[inline]
     pub fn from(self) -> u8 {
         (self.0 & 63) as u8
     }
-
     /// Destination square.
     #[inline]
     pub fn to(self) -> u8 {
         ((self.0 >> 6) & 63) as u8
     }
-
+    /// Moved-piece index 0–5 (pawn on promotions, where the field holds
+    /// the placed piece instead). `make`'s fast path — no probe loop.
+    #[inline]
+    pub fn mover(self) -> u8 {
+        if (self.0 >> 15) & 1 == 1 {
+            PAWN as u8
+        } else {
+            ((self.0 >> 12) & 7) as u8
+        }
+    }
     /// Promotion piece (0 = none, 1 = N, 2 = B, 3 = R, 4 = Q).
     #[inline]
     pub fn promo(self) -> u8 {
-        ((self.0 >> 12) & 7) as u8
+        if (self.0 >> 15) & 1 == 1 {
+            ((self.0 >> 12) & 7) as u8
+        } else {
+            0
+        }
     }
-
-    /// Double-push, EP capture, or castle (kind inferred by `make`).
-    #[inline]
-    pub fn is_special(self) -> bool {
-        (self.0 >> 15) & 1 == 1
-    }
-
     /// True for any promotion (quiet or capture).
     #[inline]
     pub fn is_promotion(self) -> bool {
-        self.promo() != 0
+        (self.0 >> 15) & 1 == 1
     }
 }
-
-// ---------------------------------------------------------------------------
-// Movelist: stack array + len, zero heap.
 // ---------------------------------------------------------------------------
 
 /// Preallocated move buffer (cap [`MOVELIST_CAP`]); `len` counts fills.
@@ -392,6 +402,56 @@ fn is_attacked_occ(b: &Board, sq: u8, by_white: bool, occ: u64) -> bool {
 pub fn is_attacked(b: &Board, sq: u8, by_white: bool) -> bool {
     is_attacked_occ(b, sq, by_white, b.occupancies[OCC])
 }
+/// King-destination safety over `king_raw` (<= 8 squares) under occupancy
+/// `occ` (caller passes live occupancy with the moving king cleared: a king
+/// never shields its own destination).
+///
+/// Bit-identical to probing each destination with [`is_attacked_occ`]: same
+/// attack tables, same order (pawns → knights → king → diag → orth), same
+/// occupancy. Per-node invariants hoist out of the per-dest loop: the foe
+/// leaper/diag/orth masks are computed once, and a leaper class with zero
+/// pieces skips its table load + probe entirely. Portable (pure bitops, no
+/// arch gates): the skip helps wherever a piece class is absent, most in
+/// thin endgames; middlegame sets stay on the full probe chain.
+#[inline(always)]
+fn king_safe_targets<const WHITE: bool>(b: &Board, king_raw: u64, occ: u64, foe: u64) -> u64 {
+    let foe_pawns = b.occupancies[PAWN] & foe;
+    let foe_knights = b.occupancies[KNIGHT] & foe;
+    let foe_king = b.occupancies[KING] & foe;
+    let foe_diag = (b.occupancies[BISHOP] | b.occupancies[QUEEN]) & foe;
+    let foe_orth = (b.occupancies[ROOK] | b.occupancies[QUEEN]) & foe;
+    // Attacker colour (`!WHITE`) folded at compile time: no per-dest branch.
+    let pawn_idx = if !WHITE { 0 } else { 1 };
+    let has_pawns = foe_pawns != 0;
+    let has_knights = foe_knights != 0;
+    let has_king = foe_king != 0;
+    let has_diag = foe_diag != 0;
+    let has_orth = foe_orth != 0;
+    let mut safe = 0u64;
+    let mut dests = king_raw;
+    while dests != 0 {
+        let d = dests.trailing_zeros() as u8;
+        dests &= dests - 1;
+        let di = d as usize;
+        if has_pawns && foe_pawns & PAWN_ATK[pawn_idx][di] != 0 {
+            continue;
+        }
+        if has_knights && foe_knights & KNIGHT_TAB[di] != 0 {
+            continue;
+        }
+        if has_king && foe_king & KING_TAB[di] != 0 {
+            continue;
+        }
+        if has_diag && bishop_attacks(d, occ) & foe_diag != 0 {
+            continue;
+        }
+        if has_orth && rook_attacks(d, occ) & foe_orth != 0 {
+            continue;
+        }
+        safe |= 1u64 << d;
+    }
+    safe
+}
 
 /// Checker set plus split pin masks from a single king-ray pass.
 ///
@@ -425,7 +485,7 @@ fn checkers_and_pins(
         let between = between_squares(ksq, s) & occ;
         if between == 0 {
             checkers |= 1u64 << s;
-        } else if between.count_ones() == 1 && between & own != 0 {
+        } else if between.is_power_of_two() && between & own != 0 {
             pinned_diag |= between;
         }
     }
@@ -437,7 +497,7 @@ fn checkers_and_pins(
         let between = between_squares(ksq, s) & occ;
         if between == 0 {
             checkers |= 1u64 << s;
-        } else if between.count_ones() == 1 && between & own != 0 {
+        } else if between.is_power_of_two() && between & own != 0 {
             pinned_hv |= between;
         }
     }
@@ -496,12 +556,12 @@ const RANK_1: u64 = 0x0000_0000_0000_00FF;
 /// count path never runs `trailing_zeros` / `push` loops.
 pub trait MoveSink {
     /// Quiet/capture moves from `from` to each bit of `targets`
-    /// (no promotion, no special flag).
-    fn push_targets(&mut self, from: u8, targets: u64);
+    /// (no promotion). `mover` rides in the token for `make`.
+    fn push_targets(&mut self, from: u8, targets: u64, mover: u8);
     /// Non-promotion pawn moves with `from = to - offset`
     /// (singles and captures; doubles go through [`MoveSink::push_pawn_doubles`]).
     fn push_pawn_moves(&mut self, targets: u64, offset: i32);
-    /// Double pushes with `from = to - offset` (special flag set).
+    /// Double pushes with `from = to - offset` (mover pawn, derived in `make`).
     fn push_pawn_doubles(&mut self, targets: u64, offset: i32);
     /// Promotions with `from = to - offset` (each target expands to N, B, R, Q).
     fn push_pawn_promos(&mut self, targets: u64, offset: i32);
@@ -519,11 +579,11 @@ pub trait MoveSink {
 //
 impl MoveSink for MoveList {
     #[inline(always)]
-    fn push_targets(&mut self, from: u8, mut targets: u64) {
+    fn push_targets(&mut self, from: u8, mut targets: u64, mover: u8) {
         while targets != 0 {
             let to = targets.trailing_zeros() as u8;
             targets &= targets - 1;
-            self.push(Move::new(from, to, 0, false));
+            self.push(Move::new(from, to, mover, 0));
         }
     }
     #[inline(always)]
@@ -531,7 +591,7 @@ impl MoveSink for MoveList {
         while targets != 0 {
             let to = targets.trailing_zeros() as u8;
             targets &= targets - 1;
-            self.push(Move::new((to as i32 - offset) as u8, to, 0, false));
+            self.push(Move::new((to as i32 - offset) as u8, to, PAWN as u8, 0));
         }
     }
     #[inline(always)]
@@ -539,7 +599,7 @@ impl MoveSink for MoveList {
         while targets != 0 {
             let to = targets.trailing_zeros() as u8;
             targets &= targets - 1;
-            self.push(Move::new((to as i32 - offset) as u8, to, 0, true));
+            self.push(Move::new((to as i32 - offset) as u8, to, PAWN as u8, 0));
         }
     }
     #[inline(always)]
@@ -549,7 +609,7 @@ impl MoveSink for MoveList {
             targets &= targets - 1;
             let from = (to as i32 - offset) as u8;
             for promo in 1..=4u8 {
-                self.push(Move::new(from, to, promo, false));
+                self.push(Move::new(from, to, PAWN as u8, promo));
             }
         }
     }
@@ -580,7 +640,7 @@ impl MoveCounter {
 //
 impl MoveSink for MoveCounter {
     #[inline(always)]
-    fn push_targets(&mut self, _from: u8, targets: u64) {
+    fn push_targets(&mut self, _from: u8, targets: u64, _mover: u8) {
         self.count += targets.count_ones();
     }
     #[inline(always)]
@@ -655,7 +715,7 @@ struct HasLegal {
 //
 impl MoveSink for HasLegal {
     #[inline(always)]
-    fn push_targets(&mut self, _from: u8, targets: u64) {
+    fn push_targets(&mut self, _from: u8, targets: u64, _mover: u8) {
         self.found |= targets != 0;
     }
     #[inline(always)]
@@ -712,22 +772,17 @@ fn generate_moves_into<S: MoveSink, const WHITE: bool>(b: &Board, sink: &mut S) 
     //
     // 2. King destinations, probed lazily per square. Only `king_raw`
     // (<= 8 squares) is ever consumed, so each destination gets an
-    // early-exit `is_attacked_occ` probe instead of scanning every enemy
-    // slider into a full-board danger mask. A boxed king (`king_raw == 0`)
-    // skips all attack work, castling rights or not (castling tests its
-    // own squares in `castle_*_ok`).
-    let mut king_targets = 0u64;
-    if have_king && king_raw != 0 {
-        let occ_wo_king = occ ^ (1u64 << ksq);
-        let mut dests = king_raw;
-        while dests != 0 {
-            let d = dests.trailing_zeros() as u8;
-            dests &= dests - 1;
-            if !is_attacked_occ(b, d, !WHITE, occ_wo_king) {
-                king_targets |= 1u64 << d;
-            }
-        }
-    }
+    // early-exit probe instead of scanning every enemy slider into a
+    // full-board danger mask. A boxed king (`king_raw == 0`) skips all
+    // attack work, castling rights or not (castling tests its own squares
+    // in `castle_*_ok`). Per-node invariants (foe leaper/diag/orth masks)
+    // hoist out of the per-dest loop and empty leaper classes skip their
+    // table load + probe entirely — bit-identical to `is_attacked_occ`.
+    let king_targets = if have_king && king_raw != 0 {
+        king_safe_targets::<WHITE>(b, king_raw, occ ^ (1u64 << ksq), foe)
+    } else {
+        0
+    };
     //
     // 3. Evasion mask: whole board when calm; checker (+ interposition ray
     // for sliders) under single check; empty under double check (king only).
@@ -775,7 +830,7 @@ fn generate_moves_into<S: MoveSink, const WHITE: bool>(b: &Board, sink: &mut S) 
     //
     // 6. King moves (canonical slot) + castling (calm only, K then Q).
     if have_king {
-        sink.push_targets(ksq, king_targets);
+        sink.push_targets(ksq, king_targets, KING as u8);
         if sink.done() {
             return;
         }
@@ -809,13 +864,13 @@ fn emit_castles<S: MoveSink, const WHITE: bool>(b: &Board, occ: u64, sink: &mut 
             return;
         }
         if short_open && !is_attacked(b, 5, false) && !is_attacked(b, 6, false) {
-            sink.push_one(Move::new(4, 6, 0, true));
+            sink.push_one(Move::new(4, 6, KING as u8, 0));
         }
         if sink.done() {
             return;
         }
         if long_open && !is_attacked(b, 3, false) && !is_attacked(b, 2, false) {
-            sink.push_one(Move::new(4, 2, 0, true));
+            sink.push_one(Move::new(4, 2, KING as u8, 0));
         }
     } else {
         let rights = b.state[0] & (BK | BQ);
@@ -831,13 +886,13 @@ fn emit_castles<S: MoveSink, const WHITE: bool>(b: &Board, occ: u64, sink: &mut 
             return;
         }
         if short_open && !is_attacked(b, 61, true) && !is_attacked(b, 62, true) {
-            sink.push_one(Move::new(60, 62, 0, true));
+            sink.push_one(Move::new(60, 62, KING as u8, 0));
         }
         if sink.done() {
             return;
         }
         if long_open && !is_attacked(b, 59, true) && !is_attacked(b, 58, true) {
-            sink.push_one(Move::new(60, 58, 0, true));
+            sink.push_one(Move::new(60, 58, KING as u8, 0));
         }
     }
 }
@@ -883,7 +938,7 @@ fn emit_knight_moves<S: MoveSink, const WHITE: bool>(
     while knights != 0 {
         let from = knights.trailing_zeros() as u8;
         knights &= knights - 1;
-        sink.push_targets(from, knight_attacks(from) & !own & check_mask);
+        sink.push_targets(from, knight_attacks(from) & !own & check_mask, KNIGHT as u8);
     }
 }
 //
@@ -912,7 +967,7 @@ fn emit_slider_moves<S: MoveSink, const WHITE: bool>(
         if pinned_diag >> from & 1 != 0 {
             targets &= line_through(ksq, from);
         }
-        sink.push_targets(from, targets);
+        sink.push_targets(from, targets, BISHOP as u8);
     }
     if sink.done() {
         return;
@@ -925,7 +980,7 @@ fn emit_slider_moves<S: MoveSink, const WHITE: bool>(
         if pinned_hv >> from & 1 != 0 {
             targets &= line_through(ksq, from);
         }
-        sink.push_targets(from, targets);
+        sink.push_targets(from, targets, ROOK as u8);
     }
     if sink.done() {
         return;
@@ -938,7 +993,7 @@ fn emit_slider_moves<S: MoveSink, const WHITE: bool>(
         if (pinned_hv | pinned_diag) >> from & 1 != 0 {
             targets &= line_through(ksq, from);
         }
-        sink.push_targets(from, targets);
+        sink.push_targets(from, targets, QUEEN as u8);
     }
 }
 //
@@ -966,19 +1021,37 @@ fn emit_pawn_moves<S: MoveSink, const WHITE: bool>(
     }
     let empty = !occ;
     let promo_rank = if WHITE { RANK_8 } else { RANK_1 };
-    let (single_raw, dbl_targets, cap_l, cap_r, push, dbl, off_l, off_r) = if WHITE {
+    let (single_raw, dbl_nomask, cap_l, cap_r, push, dbl, off_l, off_r) = if WHITE {
         let single = (pawns << 8) & empty;
-        let dbl = ((single & RANK_3) << 8) & empty & check_mask;
+        // No `& check_mask` here: the calm-fast path below consumes the
+        // unmasked lanes directly, the slow path masks once per lane.
+        let dbl = ((single & RANK_3) << 8) & empty;
         let cl = ((pawns & !FILE_A) << 7) & enemy;
         let cr = ((pawns & !FILE_H) << 9) & enemy;
         (single, dbl, cl, cr, 8i32, 16i32, 7i32, 9i32)
     } else {
         let single = (pawns >> 8) & empty;
-        let dbl = ((single & RANK_6) >> 8) & empty & check_mask;
+        let dbl = ((single & RANK_6) >> 8) & empty;
         let cl = ((pawns & !FILE_A) >> 9) & enemy;
         let cr = ((pawns & !FILE_H) >> 7) & enemy;
         (single, dbl, cl, cr, -8i32, -16i32, -9i32, -7i32)
     };
+    let pinned = pinned_hv | pinned_diag;
+    // Fast-calm path (the common case): no check and nothing pinned, so the
+    // lanes are already exact — one branch, straight-line emission with only
+    // the promo-rank split per lane, zero per-class check re-masking.
+    if check_mask == !0u64 && pinned == 0 {
+        sink.push_pawn_moves(single_raw & !promo_rank, push);
+        sink.push_pawn_promos(single_raw & promo_rank, push);
+        sink.push_pawn_doubles(dbl_nomask, dbl);
+        sink.push_pawn_moves(cap_l & !promo_rank, off_l);
+        sink.push_pawn_promos(cap_l & promo_rank, off_l);
+        sink.push_pawn_moves(cap_r & !promo_rank, off_r);
+        sink.push_pawn_promos(cap_r & promo_rank, off_r);
+        emit_ep::<_, WHITE>(b, ksq, have_king, pinned, check_mask, occ, pawns, sink);
+        return;
+    }
+    let dbl_targets = dbl_nomask & check_mask;
     let single = single_raw & check_mask;
     let (single_np, single_pr) = (single & !promo_rank, single & promo_rank);
     let (cap_l_np, cap_l_pr) = (
@@ -989,7 +1062,6 @@ fn emit_pawn_moves<S: MoveSink, const WHITE: bool>(
         cap_r & check_mask & !promo_rank,
         cap_r & check_mask & promo_rank,
     );
-    let pinned = pinned_hv | pinned_diag;
     if pinned == 0 {
         sink.push_pawn_moves(single_np, push);
         sink.push_pawn_promos(single_pr, push);
@@ -1052,10 +1124,10 @@ fn emit_pawn_class<S: MoveSink>(
         }
         if is_promo {
             for promo in 1..=4u8 {
-                sink.push_one(Move::new(from, to, promo, false));
+                sink.push_one(Move::new(from, to, PAWN as u8, promo));
             }
         } else {
-            sink.push_one(Move::new(from, to, 0, is_double));
+            sink.push_one(Move::new(from, to, PAWN as u8, 0));
         }
     }
 }
@@ -1116,7 +1188,7 @@ fn emit_ep<S: MoveSink, const WHITE: bool>(
                 continue;
             }
         }
-        sink.push_one(Move::new(from, ep, 0, true));
+        sink.push_one(Move::new(from, ep, PAWN as u8, 0));
     }
 }
 //
@@ -1145,31 +1217,31 @@ fn gen_for(b: &Board, white: bool, list: &mut MoveList) {
     while knights != 0 {
         let from = knights.trailing_zeros() as u8;
         knights &= knights - 1;
-        push_targets(list, from, knight_attacks(from) & !own);
+        push_targets(list, from, knight_attacks(from) & !own, KNIGHT as u8);
     }
     let mut bishops = piece_bb(b, white, BISHOP);
     while bishops != 0 {
         let from = bishops.trailing_zeros() as u8;
         bishops &= bishops - 1;
-        push_targets(list, from, bishop_attacks(from, occ) & !own);
+        push_targets(list, from, bishop_attacks(from, occ) & !own, BISHOP as u8);
     }
     let mut rooks = piece_bb(b, white, ROOK);
     while rooks != 0 {
         let from = rooks.trailing_zeros() as u8;
         rooks &= rooks - 1;
-        push_targets(list, from, rook_attacks(from, occ) & !own);
+        push_targets(list, from, rook_attacks(from, occ) & !own, ROOK as u8);
     }
     let mut queens = piece_bb(b, white, QUEEN);
     while queens != 0 {
         let from = queens.trailing_zeros() as u8;
         queens &= queens - 1;
-        push_targets(list, from, queen_attacks(from, occ) & !own);
+        push_targets(list, from, queen_attacks(from, occ) & !own, QUEEN as u8);
     }
 
     let king = piece_bb(b, white, KING);
     if king != 0 {
         let from = king.trailing_zeros() as u8;
-        push_targets(list, from, king_attacks(from) & !own);
+        push_targets(list, from, king_attacks(from) & !own, KING as u8);
     }
 
     gen_castling(b, white, occ, list);
@@ -1178,11 +1250,11 @@ fn gen_for(b: &Board, white: bool, list: &mut MoveList) {
 
 #[inline]
 #[cfg(test)]
-fn push_targets(list: &mut MoveList, from: u8, mut targets: u64) {
+fn push_targets(list: &mut MoveList, from: u8, mut targets: u64, mover: u8) {
     while targets != 0 {
         let to = targets.trailing_zeros() as u8;
         targets &= targets - 1;
-        list.push(Move::new(from, to, 0, false));
+        list.push(Move::new(from, to, mover, 0));
     }
 }
 
@@ -1201,12 +1273,12 @@ fn gen_pawns(b: &Board, white: bool, occ: u64, own: u64, enemy: u64, list: &mut 
             if occ >> (from + 8) & 1 == 0 {
                 if r == 6 {
                     for promo in 1..=4 {
-                        list.push(Move::new(from, from + 8, promo, false));
+                        list.push(Move::new(from, from + 8, PAWN as u8, promo));
                     }
                 } else {
-                    list.push(Move::new(from, from + 8, 0, false));
+                    list.push(Move::new(from, from + 8, PAWN as u8, 0));
                     if r == 1 && occ >> (from + 16) & 1 == 0 {
-                        list.push(Move::new(from, from + 16, 0, true));
+                        list.push(Move::new(from, from + 16, PAWN as u8, 0));
                     }
                 }
             }
@@ -1235,12 +1307,12 @@ fn gen_pawns(b: &Board, white: bool, occ: u64, own: u64, enemy: u64, list: &mut 
             if occ >> (from - 8) & 1 == 0 {
                 if r == 1 {
                     for promo in 1..=4 {
-                        list.push(Move::new(from, from - 8, promo, false));
+                        list.push(Move::new(from, from - 8, PAWN as u8, promo));
                     }
                 } else {
-                    list.push(Move::new(from, from - 8, 0, false));
+                    list.push(Move::new(from, from - 8, PAWN as u8, 0));
                     if r == 6 && occ >> (from - 16) & 1 == 0 {
-                        list.push(Move::new(from, from - 16, 0, true));
+                        list.push(Move::new(from, from - 16, PAWN as u8, 0));
                     }
                 }
             }
@@ -1287,17 +1359,17 @@ impl<'a> PawnCap<'a> {
         if self.enemy >> to & 1 == 1 {
             if is_promo_rank {
                 for promo in 1..=4 {
-                    self.list.push(Move::new(from, to, promo, false));
+                    self.list.push(Move::new(from, to, PAWN as u8, promo));
                 }
             } else {
-                self.list.push(Move::new(from, to, 0, false));
+                self.list.push(Move::new(from, to, PAWN as u8, 0));
             }
         } else if to == self.ep && self.ep != EP_NONE {
             // Victim one rank behind `to`; required so a stray EP square on a
             // malformed FEN yields no phantom move.
             let victim = if self.white { to - 8 } else { to + 8 };
             if (self.b.occupancies[PAWN] & colour_bb(self.b, !self.white)) >> victim & 1 == 1 {
-                self.list.push(Move::new(from, to, 0, true));
+                self.list.push(Move::new(from, to, PAWN as u8, 0));
             }
         }
     }
@@ -1350,17 +1422,17 @@ fn castle_long_ok(b: &Board, white: bool, occ: u64) -> bool {
 fn gen_castling(b: &Board, white: bool, occ: u64, list: &mut MoveList) {
     if white {
         if castle_short_ok(b, white, occ) {
-            list.push(Move::new(4, 6, 0, true));
+            list.push(Move::new(4, 6, KING as u8, 0));
         }
         if castle_long_ok(b, white, occ) {
-            list.push(Move::new(4, 2, 0, true));
+            list.push(Move::new(4, 2, KING as u8, 0));
         }
     } else {
         if castle_short_ok(b, white, occ) {
-            list.push(Move::new(60, 62, 0, true));
+            list.push(Move::new(60, 62, KING as u8, 0));
         }
         if castle_long_ok(b, white, occ) {
-            list.push(Move::new(60, 58, 0, true));
+            list.push(Move::new(60, 58, KING as u8, 0));
         }
     }
 }
@@ -1399,21 +1471,17 @@ pub fn make(b: &mut Board, mv: Move) -> StateInfo {
     let foe_i = if white { BLACK } else { WHITE };
     let from_bit = 1u64 << from;
     let to_bit = 1u64 << to;
+    // Moved piece rides in the token (pawn on promotions, where the field
+    // holds the placed piece): no probe loop. Victim probe below stays
+    // pawn-first — captures take pawns most often.
+    let piece = mv.mover() as usize;
     debug_assert!(
-        from < 64 && to < 64 && (b.occupancies[own_i] & from_bit) != 0,
+        from < 64
+            && to < 64
+            && (b.occupancies[own_i] & from_bit) != 0
+            && (b.occupancies[piece] & from_bit) != 0,
         "make requires a legal move token (mover on `from`); got {from}->{to}"
     );
-
-    // Moved piece: pawn on promotions, else whichever own piece sits on `from`.
-    let mut piece = PAWN;
-    if promo == 0 {
-        for p in PAWN..=KING {
-            if b.occupancies[p] & from_bit & colour_bb(b, white) != 0 {
-                piece = p;
-                break;
-            }
-        }
-    }
     // Capture: enemy on `to`, or (pawn diagonal to empty) the EP victim.
     let mut captured: u64 = NO_CAP;
     let mut cap_sq = 64u8;
