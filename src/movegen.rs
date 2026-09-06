@@ -112,6 +112,21 @@ const EP_MASK: u64 = 0x7f << EP_SHIFT; // 7 bits @5-11: 0-63 sq, 64 none
 const HM_SHIFT: u64 = 12;
 const HM_MASK: u64 = 0x3fff << HM_SHIFT; // 14 bits @12-25
 const NO_CAP: u64 = 8;
+//
+// Stable unlikely polyfill (docs-blessed `cold_path` recipe, 1.95.0+;
+// `likely_unlikely` intrinsics still nightly-only). Pure hint attribute —
+// no semantics. Each site gated separately by benchmark (`likely` dropped:
+// every calm-path annotation measured neutral-to-negative); hints × PGO
+// interact, so the PGO retrain happens over the kept set at the end.
+#[inline(always)]
+const fn unlikely(b: bool) -> bool {
+    if b {
+        core::hint::cold_path();
+        true
+    } else {
+        false
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Move accessors (layout owned here).
@@ -1435,19 +1450,20 @@ pub fn multiply_ctx(b: &mut Board) -> MultiplyCtx {
 /// move whose from/to squares touch the interference sets.
 #[inline]
 pub fn multiply_is_quiet(ctx: &MultiplyCtx, b: &Board, mv: Move) -> bool {
+    // F5 site (b): foe-occupancy capture test first — captures take the
+    // exact path, so failing fast here skips the gate checks below.
+    let from = mv.from();
+    let to = mv.to();
+    let to_bit = 1u64 << to;
+    let white = stm_white(b);
+    if unlikely(b.occupancies[if white { BLACK } else { WHITE }] & to_bit != 0) {
+        return false;
+    }
     if mv.is_promotion() {
         return false;
     }
-    let from = mv.from();
-    let to = mv.to();
     let mover = mv.mover() as usize;
     if mover == KING && ((to & 7) as i8 - (from & 7) as i8).abs() == 2 {
-        return false;
-    }
-    let white = stm_white(b);
-    let foe = b.occupancies[if white { BLACK } else { WHITE }];
-    let to_bit = 1u64 << to;
-    if foe & to_bit != 0 {
         return false;
     }
     if mover == PAWN {
