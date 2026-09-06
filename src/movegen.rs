@@ -1193,6 +1193,287 @@ fn emit_ep<S: MoveSink, const WHITE: bool>(
 }
 //
 // ---------------------------------------------------------------------------
+// Depth-2 MoveSetMultiply support (beam P1, portable).
+// ---------------------------------------------------------------------------
+//
+/// Interference sets + null-move opponent count for the depth-2 multiply
+/// arm of the bulk perft horizon: moves classified quiet by
+/// [`multiply_is_quiet`] share the pre-counted [`MultiplyCtx::opp`] reply
+/// total instead of one make → count → unmake each. Portable bitops only,
+/// no arch gates. Generation semantics are untouched — this only reads.
+///
+/// Soundness shape (TempleChess `MoveSetMultiply`): leaper moves are
+/// occupancy-neutral at the endpoints (a capture swaps 1:1 with the quiet
+/// it replaces, same legality both ways — only the moved piece's attacks
+/// change, and a piece never attacks its own square), so only pawn/slider
+/// target squares (`from` / `to_empty`), our attacks on the enemy king's
+/// ring (`to_piece`, `from`), pin-ray interiors, and the specials below can
+/// change the enemy reply set. Two closings beyond the precedent: the
+/// king-relevant set is extended with the enemy castle-transit squares (a
+/// quiet move newly attacking c8/c1 alone would cost O-O-O), and the enemy
+/// back-rank b-file square sits in both sets (vacating it unblocks O-O-O
+/// path emptiness with no attack-map trace).
+pub struct MultiplyCtx {
+    /// Our from-squares that would disturb the enemy reply set.
+    pub from: u64,
+    /// Enemy-relevant to-squares (their pawn/slider targets, our captures,
+    /// pin-ray interiors, back-rank b-file).
+    pub to_empty: u64,
+    /// Per-mover-type to-squares that would change our attacks on the enemy
+    /// king ring (index 0–5 = P N B R Q K). Promotions never consult this.
+    pub to_piece: [u64; 6],
+    /// Enemy pawn attacks (for the double-push/EP rule).
+    pub their_pawn_atk: u64,
+    /// Enemy reply total with our move passed (null-move count: stm flipped,
+    /// EP cleared — exactly the EP/rights state every quiet move leaves).
+    pub opp: u32,
+}
+//
+/// Build the [`MultiplyCtx`] for the side to move: interference sets plus
+/// the flipped-stm, EP-cleared enemy count. Leaves `b` bit-exact (the flip
+/// is restored before return).
+pub fn multiply_ctx(b: &mut Board) -> MultiplyCtx {
+    let white = stm_white(b);
+    let occ = b.occupancies[OCC];
+    let empty = !occ;
+    let own = b.occupancies[if white { WHITE } else { BLACK }];
+    let foe = b.occupancies[if white { BLACK } else { WHITE }];
+    let our_pawns = b.occupancies[PAWN] & own;
+    let their_pawns = b.occupancies[PAWN] & foe;
+    // Their pawn pushes (RAW landings — no emptiness mask: a square blocked
+    // by our piece is exactly what our move might vacate, unblocking their
+    // push, e.g. Ne5-g4 opens e6-e5) + attacks (capture possibilities).
+    let (their_push, their_pawn_atk) = if white {
+        let s1 = their_pawns >> 8;
+        (
+            s1 | ((s1 & RANK_6) >> 8),
+            ((their_pawns & !FILE_A) >> 9) | ((their_pawns & !FILE_H) >> 7),
+        )
+    } else {
+        let s1 = their_pawns << 8;
+        (
+            s1 | ((s1 & RANK_3) << 8),
+            ((their_pawns & !FILE_A) << 7) | ((their_pawns & !FILE_H) << 9),
+        )
+    };
+    // loses moves, never gains, so the unmasked union is a sound superset).
+    let mut their_sliders =
+        (b.occupancies[BISHOP] | b.occupancies[ROOK] | b.occupancies[QUEEN]) & foe;
+    let mut their_slide = 0u64;
+    while their_sliders != 0 {
+        let s = their_sliders.trailing_zeros() as u8;
+        their_sliders &= their_sliders - 1;
+        let bit = 1u64 << s;
+        if bit & (b.occupancies[BISHOP] | b.occupancies[QUEEN]) != 0 {
+            their_slide |= bishop_attacks(s, occ);
+        }
+        if bit & (b.occupancies[ROOK] | b.occupancies[QUEEN]) != 0 {
+            their_slide |= rook_attacks(s, occ);
+        }
+    }
+    their_slide &= !foe;
+    //
+    let mut from = their_push | their_pawn_atk | their_slide;
+    let mut to_empty = from | foe;
+    // Enemy back-rank b-file: vacating it unblocks O-O-O path emptiness with
+    // no attack-map trace (bishop/king vacates miss every ring projection).
+    let b_sq = if white { 57u8 } else { 1u8 };
+    from |= 1u64 << b_sq;
+    to_empty |= 1u64 << b_sq;
+    //
+    // King-relevant set: ring + king square, extended with castle-transit
+    // squares (attack-only changes on c8/c1 cost castling outside the ring).
+    let their_king = b.occupancies[KING] & foe;
+    let mut ring_n = 0u64;
+    let mut ring_k = 0u64;
+    let mut ring_b = 0u64;
+    let mut ring_r = 0u64;
+    let mut our_pawn_proj = 0u64;
+    let mut s1_list = [64u8; 16];
+    let mut proj_b = [0u64; 16];
+    let mut proj_r = [0u64; 16];
+    let mut n_s1 = 0usize;
+    if their_king != 0 {
+        let ksq = their_king.trailing_zeros() as u8;
+        let mut kr = (KING_TAB[ksq as usize] & !foe) | (1u64 << ksq);
+        kr |= if white { 0x6C00_0000_0000_0000 } else { 0x6C };
+        let us_pawn = if white { 0 } else { 1 };
+        while kr != 0 {
+            let s1 = kr.trailing_zeros() as u8;
+            kr &= kr - 1;
+            let pb = bishop_attacks(s1, 0);
+            let pr = rook_attacks(s1, 0);
+            ring_n |= KNIGHT_TAB[s1 as usize];
+            ring_k |= KING_TAB[s1 as usize];
+            ring_b |= pb;
+            ring_r |= pr;
+            our_pawn_proj |= PAWN_ATK[us_pawn][s1 as usize];
+            s1_list[n_s1] = s1;
+            proj_b[n_s1] = pb;
+            proj_r[n_s1] = pr;
+            n_s1 += 1;
+        }
+    }
+    //
+    let mut to_piece = [0u64; 6];
+    // Pawns: pushes (real landings) that would attack the ring; from-squares
+    // already attacking it. Captures ride in `to_empty` via `foe`.
+    let our_push = if white {
+        let s1 = (our_pawns << 8) & empty;
+        s1 | ((s1 & RANK_3) << 8) & empty
+    } else {
+        let s1 = (our_pawns >> 8) & empty;
+        s1 | ((s1 & RANK_6) >> 8) & empty
+    };
+    let our_pawn_moves = our_push
+        | if white {
+            ((our_pawns & !FILE_A) << 7) | ((our_pawns & !FILE_H) << 9)
+        } else {
+            ((our_pawns & !FILE_A) >> 9) | ((our_pawns & !FILE_H) >> 7)
+        };
+    to_piece[PAWN] |= our_pawn_moves & our_pawn_proj;
+    from |= our_pawns & our_pawn_proj;
+    // Knights / king: table lookups; from-side vectorised (a piece sitting
+    // on a square that attacks the ring disturbs it by leaving).
+    let our_knights = b.occupancies[KNIGHT] & own;
+    from |= our_knights & ring_n;
+    let mut nk = our_knights;
+    while nk != 0 {
+        let s = nk.trailing_zeros() as u8;
+        nk &= nk - 1;
+        to_piece[KNIGHT] |= KNIGHT_TAB[s as usize] & ring_n;
+    }
+    let our_king = b.occupancies[KING] & own;
+    from |= our_king & ring_k;
+    if our_king != 0 {
+        to_piece[KING] |= KING_TAB[our_king.trailing_zeros() as usize] & ring_k;
+    }
+    // Sliders: from-side vectorised; to-side per piece with real occupancy
+    // (tighter — a legal slider target is reachable, hence in its real ray).
+    // Queens take FULL cross rays: an orthogonal slide can newly attack the
+    // ring diagonally and vice versa (e.g. Qa5-h5 finding Kf2's f3 flight),
+    // so splitting queen halves across ring_b/ring_r misses the cross terms.
+    let our_bishops = b.occupancies[BISHOP] & own;
+    let our_rooks = b.occupancies[ROOK] & own;
+    let our_queens = b.occupancies[QUEEN] & own;
+    let our_diag = (b.occupancies[BISHOP] | b.occupancies[QUEEN]) & own;
+    let our_orth = (b.occupancies[ROOK] | b.occupancies[QUEEN]) & own;
+    let ring_q = ring_b | ring_r;
+    from |= our_bishops & ring_b;
+    from |= our_rooks & ring_r;
+    from |= our_queens & ring_q;
+    let mut dg = our_bishops;
+    while dg != 0 {
+        let s = dg.trailing_zeros() as u8;
+        dg &= dg - 1;
+        to_piece[BISHOP] |= bishop_attacks(s, occ) & ring_b;
+    }
+    let mut or = our_rooks;
+    while or != 0 {
+        let s = or.trailing_zeros() as u8;
+        or &= or - 1;
+        to_piece[ROOK] |= rook_attacks(s, occ) & ring_r;
+    }
+    let mut qq = our_queens;
+    while qq != 0 {
+        let s = qq.trailing_zeros() as u8;
+        qq &= qq - 1;
+        to_piece[QUEEN] |= (bishop_attacks(s, occ) | rook_attacks(s, occ)) & ring_q;
+    }
+    // Pin-ray interiors: our slider aligned with a king-relevant square —
+    // any move touching the between-squares blocks/unblocks our attack.
+    for i in 0..n_s1 {
+        let s1 = s1_list[i];
+        let mut d2 = our_diag & proj_b[i];
+        while d2 != 0 {
+            let s = d2.trailing_zeros() as u8;
+            d2 &= d2 - 1;
+            let btw = between_squares(s1, s);
+            from |= btw;
+            to_empty |= btw;
+        }
+        let mut r2 = our_orth & proj_r[i];
+        while r2 != 0 {
+            let s = r2.trailing_zeros() as u8;
+            r2 &= r2 - 1;
+            let btw = between_squares(s1, s);
+            from |= btw;
+            to_empty |= btw;
+        }
+    }
+    // Specials: any pawn move to the last rank promotes; the EP square is an
+    // EP-capture landing; king ±2 file steps are castles (off-home the bits
+    // never coincide with a legal non-castle king target — harmless).
+    to_piece[PAWN] |= if white { RANK_8 } else { RANK_1 };
+    let ep = ep_sq(b);
+    if ep < 64 {
+        to_piece[PAWN] |= 1u64 << ep;
+    }
+    to_piece[KING] |= (our_king >> 2) | (our_king << 2);
+    //
+    // Null-move enemy total: stm flipped, EP cleared — exactly the state
+    // every quiet move leaves (quiet never sets EP, never touches enemy
+    // rights; own-rights changes don't affect enemy replies).
+    let saved = b.state[0];
+    b.state[0] = ((saved ^ STM) & !EP_MASK) | ((EP_NONE as u64) << EP_SHIFT);
+    let opp = count_legal(b);
+    b.state[0] = saved;
+    MultiplyCtx {
+        from,
+        to_empty,
+        to_piece,
+        their_pawn_atk,
+        opp,
+    }
+}
+//
+/// True if `mv` — a legal move for `b`, with `ctx` built from the same `b`
+/// before the move — leaves the enemy reply set counted in
+/// [`MultiplyCtx::opp`] unchanged, so the caller may add `opp` instead of
+/// make → count → unmake. Interfering (exact path): captures (including EP),
+/// promotions, castles, double pushes that create a live EP capture, and any
+/// move whose from/to squares touch the interference sets.
+#[inline]
+pub fn multiply_is_quiet(ctx: &MultiplyCtx, b: &Board, mv: Move) -> bool {
+    if mv.is_promotion() {
+        return false;
+    }
+    let from = mv.from();
+    let to = mv.to();
+    let mover = mv.mover() as usize;
+    if mover == KING && ((to & 7) as i8 - (from & 7) as i8).abs() == 2 {
+        return false;
+    }
+    let white = stm_white(b);
+    let foe = b.occupancies[if white { BLACK } else { WHITE }];
+    let to_bit = 1u64 << to;
+    if foe & to_bit != 0 {
+        return false;
+    }
+    if mover == PAWN {
+        if (from & 7) != (to & 7) {
+            // Diagonal pawn to empty: only the EP capture does this.
+            return false;
+        }
+        if (to as i8 - from as i8).abs() == 16 && (ctx.their_pawn_atk >> ((from + to) / 2)) & 1 != 0
+        {
+            // Double push with the skipped square attacked: live EP capture.
+            return false;
+        }
+    }
+    if (ctx.from >> from) & 1 != 0 {
+        return false;
+    }
+    if ctx.to_empty & to_bit != 0 {
+        return false;
+    }
+    if ctx.to_piece[mover] & to_bit != 0 {
+        return false;
+    }
+    true
+}
+//
+// ---------------------------------------------------------------------------
 // Exactness oracle (test-only): pseudo-legal gen + make-test-unmake filter.
 // ---------------------------------------------------------------------------
 
@@ -1799,7 +2080,139 @@ mod tests {
             }
         }
     }
-
+    /// Multiply arm must reproduce the plain bulk-2 sum at every node of
+    /// tactical trees (checks, pins, EP, castles, promos): each node is
+    /// treated as a depth-2 horizon and the quiet-multiplied total is
+    /// compared against per-move make → count → unmake. Any legality-delta
+    /// miss (pin-while-unblocking, EP edge, castle transit/emptiness) fails
+    /// exactly where it appears.
+    #[test]
+    fn multiply_matches_plain_everywhere() {
+        let cases: [(&str, u32); 9] = [
+            (STARTPOS, 2),
+            (
+                "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+                2,
+            ),
+            (
+                "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
+                2,
+            ),
+            (
+                "rnbqkbnr/ppp1pppp/8/3pP3/8/8/PPPP1PPP/RNBQKBNR w KQkq d6 0 3",
+                2,
+            ),
+            (
+                "rnbqkbnr/pp1ppppp/8/8/3pP3/8/PPP2PPP/RNBQKBNR b KQkq d3 0 3",
+                2,
+            ),
+            (
+                "r1bqkbnr/pppp1Qpp/2n5/4p3/2B1P3/8/PPPP1PPP/RNB1K1NR b KQkq - 0 3",
+                2,
+            ),
+            ("8/6bb/8/8/R1pP2k1/4P3/P7/K7 b - d3 0 1", 3),
+            ("8/2p5/3p4/KP5r/1R3p1k/8/4P1P1/8 w - - 0 1", 2),
+            (
+                "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",
+                3,
+            ),
+        ];
+        for (fen, depth) in cases {
+            let b = parse(fen).expect("multiply FEN must parse");
+            diff_multiply(&b, depth, fen, &mut Vec::new());
+        }
+    }
+    fn diff_multiply(b: &Board, depth: u32, fen: &str, path: &mut Vec<(u8, u8)>) {
+        let live = *b;
+        let mut ctx_board = live;
+        let ctx = multiply_ctx(&mut ctx_board);
+        assert_eq!(ctx_board, live, "multiply_ctx mutated the board at {fen}");
+        let mut gen_board = live;
+        let mut list = MoveList::new();
+        generate_legal(&mut gen_board, &mut list);
+        let mut plain = 0u64;
+        let mut exact = 0u64;
+        let mut quiet = 0u64;
+        for m in list.as_slice() {
+            let mut child = live;
+            let undo = make(&mut child, *m);
+            let mut counter = child;
+            let n = count_legal(&mut counter) as u64;
+            unmake(&mut child, undo, *m);
+            assert_eq!(child, live, "make/unmake drift at {fen}");
+            plain += n;
+            if multiply_is_quiet(&ctx, &live, *m) {
+                quiet += 1;
+            } else {
+                exact += n;
+            }
+        }
+        assert_eq!(
+            exact + quiet * ctx.opp as u64,
+            plain,
+            "multiply/plain mismatch at {fen} path {path:?}"
+        );
+        if depth > 0 {
+            for m in list.as_slice() {
+                let mut child = live;
+                make(&mut child, *m);
+                path.push((m.from(), m.to()));
+                diff_multiply(&child, depth - 1, fen, path);
+                path.pop();
+            }
+        }
+    }
+    /// Startpos root must classify 18/20 quiet with a flipped 20, so the
+    /// oracle above is known to exercise the multiply path, not just the
+    /// exact fallback. The two interfering moves are the d-pawn pushes: d2
+    /// sits on the Qd1–black-back-rank pin ray, so pushing it changes king
+    /// danger (verified by hand against the ctx bitboards).
+    #[test]
+    fn multiply_startpos_mostly_quiet() {
+        let mut b = parse(STARTPOS).expect("startpos must parse");
+        let ctx = multiply_ctx(&mut b);
+        let mut list = MoveList::new();
+        generate_legal(&mut b, &mut list);
+        assert_eq!(list.len, 20, "startpos must have 20 legal moves");
+        let mut quiet = 0u32;
+        for m in list.as_slice() {
+            if multiply_is_quiet(&ctx, &b, *m) {
+                quiet += 1;
+            }
+        }
+        assert_eq!(quiet, 18, "startpos must classify 18 quiet");
+        assert_eq!(ctx.opp, 20, "flipped startpos must count 20");
+    }
+    /// Wired arm must match the bulk-OFF reference: `perft_bulk` exercises
+    /// the multiply path at every depth-2 node, `perft` never does.
+    #[test]
+    fn multiply_perft_matches_reference() {
+        use crate::perft::{perft, perft_bulk};
+        let cases: [(&str, u32); 5] = [
+            (STARTPOS, 3),
+            (
+                "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+                2,
+            ),
+            (
+                "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
+                2,
+            ),
+            ("8/6bb/8/8/R1pP2k1/4P3/P7/K7 b - d3 0 1", 3),
+            (
+                "r1bqkbnr/pppp1Qpp/2n5/4p3/2B1P3/8/PPPP1PPP/RNB1K1NR b KQkq - 0 3",
+                2,
+            ),
+        ];
+        for (fen, depth) in cases {
+            let b = parse(fen).expect("multiply perft FEN must parse");
+            assert_eq!(
+                perft_bulk(&b, depth),
+                perft(&b, depth),
+                "bulk/reference mismatch at {fen} d{depth}"
+            );
+        }
+    }
     #[test]
     fn startpos_twenty() {
         let (_, list) = legal(STARTPOS);
