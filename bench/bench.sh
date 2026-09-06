@@ -1,11 +1,23 @@
 #!/bin/sh
-# bench.sh — build the image, run the perft matrix (warmup + median of 5),
-# write a structured report. Nodes gated per run: a mismatch aborts.
+# bench.sh — build the image, run the measurement matrix (warmup + median of
+# 5), write a structured report. Every run is exactness-gated: a node-count
+# mismatch aborts before it can pollute the report.
 # Usage: ./bench/bench.sh [image]   (default: $IMAGE or shahmat-svc:bench)
 # Writes: outputs/bench-<utc-timestamp>.json (gitignored) + table on stdout.
+#
+# PORTING: only the CONFIG block below is project-specific (image name, the
+# MATRIX lines "name|fen|depth|expected-nodes"). The engine underneath
+# (median, gate, JSON emit) is universal — copy the file, replace CONFIG.
 set -eu
 cd "$(dirname "$0")/.."
+# --- CONFIG (project-specific; everything below is engine) ---
 IMG="${1:-${IMAGE:-shahmat-svc:bench}}"
+MATRIX="
+startpos|rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1|6|119060324
+kiwipete|r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1|5|193690690
+pos4|r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1|5|15833292
+"
+# --- engine (universal; do not touch when porting) ---
 TS="$(date -u +%Y%m%d-%H%M%S)"
 OUT="outputs/bench-${TS}.json"
 mkdir -p outputs
@@ -30,9 +42,15 @@ run() { # <name> <fen> <depth> <expected-nodes>
 }
 {
   printf '{"image":"%s","date":"%s","runs":[' "$IMG" "$TS"
-  run startpos "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1" 6 119060324; printf ','
-  run kiwipete "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1" 5 193690690; printf ','
-  run pos4 "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1" 5 15833292
+  first=1
+  while IFS='|' read -r name fen depth expected; do
+    [ -z "$name" ] && continue
+    [ "$first" -eq 1 ] || printf ','
+    first=0
+    run "$name" "$fen" "$depth" "$expected"
+  done <<MATRIX_EOF
+$MATRIX
+MATRIX_EOF
   printf ']}'
 } > "$OUT"
 printf '%s' "$TBL"

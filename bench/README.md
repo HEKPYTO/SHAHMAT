@@ -8,6 +8,12 @@ No python, no jq, no frameworks.
 | `bench.sh [image]` | Builds the image, times startpos d6 / kiwi d5 / pos4 d5 in-image (warmup + median of 5, nodes-gated), writes `outputs/bench-<utc-ts>.json` + table on stdout | Measuring speed |
 | `gate.sh [binary]` | Checks 15 exact perft counts + 2 `--no-bulk` cross-checks + divide-row self-consistency against any `shahmat-svc` binary (default `./target/release/shahmat-svc`), exit 0/1 | Proving correctness |
 
+## Porting to another project
+
+Both scripts split CONFIG (top, project-specific) from engine (bottom,
+universal). Copy the file, replace only CONFIG: the image name + `MATRIX`
+lines (`name|command-args|expected-marker`) in `bench.sh`, the `chk` data
+lines in `gate.sh`. The median/gate/JSON logic ports untouched.
 ## Benchmarking properly
 
 ```sh
