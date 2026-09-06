@@ -1271,7 +1271,9 @@ pub fn multiply_ctx(b: &mut Board) -> MultiplyCtx {
             ((their_pawns & !FILE_A) << 7) | ((their_pawns & !FILE_H) << 9),
         )
     };
-    // loses moves, never gains, so the unmasked union is a sound superset).
+    // Dropping foe-occupied squares from `their_slide` loses moves, never
+    // gains, so the masked union is a sound superset (captures stay covered:
+    // `to_empty` unions `foe` separately below).
     let mut their_sliders =
         (b.occupancies[BISHOP] | b.occupancies[ROOK] | b.occupancies[QUEEN]) & foe;
     let mut their_slide = 0u64;
@@ -2175,6 +2177,86 @@ mod tests {
                 path.push((m.from(), m.to()));
                 diff_multiply(&child, depth - 1, fen, path);
                 path.pop();
+            }
+        }
+    }
+    /// Each Multiply closing gets one gate-pinning micro-position: the named
+    /// move must classify interfering. Single-line regressions in individual
+    /// closings would plausibly keep the 9-FEN suite green (rights only
+    /// decrease along its 2–3 ply recursion, so bare back-rank shapes are
+    /// unreachable there); these four pin the b-file unblock, the pin-ray
+    /// interior, the castle-transit extension, and the ring defence.
+    #[test]
+    fn multiply_closings_pinned() {
+        // (fen, from, to): the move that must classify interfering.
+        let cases: [(&str, u8, u8); 4] = [
+            // Bb8-a7 vacates b8 and grants black O-O-O (a8 rook present,
+            // c8/d8 empty and unattacked) — quiet without the b-file rule.
+            // e5-e6 self-blocks Re8's defence of e5 so black Ke4xe5 becomes
+            // legal — quiet without the pin-ray betweens.
+            ("rb2k2r/8/8/8/8/8/8/4K3 b kq - 0 1", 57, 48),
+            ("4R3/8/8/4P3/4k3/8/8/4K3 w - - 0 1", 36, 44),
+            // b6-b7 newly attacks transit c8 and kills black O-O-O (a8 rook
+            // present) — quiet without the transit extension.
+            ("r3k3/8/1P6/8/8/8/8/4K3 w q - 0 1", 41, 49),
+            // Nd7-b6 newly defends d7 so black Kxd7 disappears — quiet
+            // without the from-side ring projection.
+            ("4k3/3N4/8/8/8/8/8/4K3 w - - 0 1", 51, 41),
+        ];
+        for (fen, from, to) in cases {
+            let mut b = parse(fen).expect("closing FEN must parse");
+            let ctx = multiply_ctx(&mut b);
+            let mut list = MoveList::new();
+            generate_legal(&mut b, &mut list);
+            let mv = list
+                .as_slice()
+                .iter()
+                .find(|m| m.from() == from && m.to() == to)
+                .unwrap_or_else(|| panic!("closing move must be legal at {fen}"));
+            assert!(
+                !multiply_is_quiet(&ctx, &b, *mv),
+                "closing must classify interfering at {fen}"
+            );
+            // The differential oracle covers the position too.
+            diff_multiply(&b, 1, fen, &mut Vec::new());
+        }
+    }
+    /// The repacked token contract, pinned directly: plain moves carry the
+    /// mover (which must equal the board piece on `from`), promotions carry
+    /// mover pawn plus the placed piece. Catches a swapped piece constant at
+    /// any single emission site as a pinned expectation, not just a debug
+    /// assertion inside `make`.
+    #[test]
+    fn move_token_mover_promo_decode() {
+        let fens = [
+            STARTPOS,
+            "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+        ];
+        for fen in fens {
+            let mut b = parse(fen).expect("decode FEN must parse");
+            let white = stm_white(&b);
+            let mut list = MoveList::new();
+            generate_legal(&mut b, &mut list);
+            assert!(!list.as_slice().is_empty(), "must have moves at {fen}");
+            for m in list.as_slice() {
+                let from_bit = 1u64 << m.from();
+                let colour = colour_bb(&b, white);
+                let mut piece = 8usize;
+                for p in PAWN..=KING {
+                    if b.occupancies[p] & from_bit & colour != 0 {
+                        piece = p;
+                        break;
+                    }
+                }
+                if m.is_promotion() {
+                    assert_eq!(m.mover(), PAWN as u8, "promo mover is pawn at {fen}");
+                    assert!((1..=4).contains(&m.promo()), "placed piece at {fen}");
+                    assert_eq!(piece, PAWN, "promo from pawn square at {fen}");
+                } else {
+                    assert_eq!(m.promo(), 0, "plain promo field at {fen}");
+                    assert_eq!(m.mover() as usize, piece, "mover matches board at {fen}");
+                }
             }
         }
     }

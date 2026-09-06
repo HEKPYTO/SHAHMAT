@@ -116,7 +116,7 @@ pub struct StateInfo {
 }
 
 /// 16-bit move token; encoding is owned by movegen (see its module docs for
-/// the bit layout: from/to squares, promotion piece, special flag).
+/// the bit layout: from/to squares, mover or placed piece, promotion flag).
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Move(pub u16);
 
