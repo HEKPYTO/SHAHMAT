@@ -10,11 +10,13 @@ No python, no jq, no frameworks.
 
 ## Porting to another project
 
-Both scripts split CONFIG (top, project-specific) from engine (bottom,
-universal). Copy the file, replace only CONFIG: the image name + `MATRIX`
-lines (`name|command-args|expected-marker`) in `bench.sh`, the `chk` data
-lines in `gate.sh`. The median/gate/JSON logic ports untouched.
-## Benchmarking properly
+Both scripts split CONFIG (top, project-specific) from engine (bottom).
+Copy the file, replace only CONFIG: the image name + `MATRIX` lines
+(`name|fen|depth|expected-nodes`) in `bench.sh`, the `chk` data lines
+(`chk ["flags"] <fen-var> <depth> <expected> <label>`) in `gate.sh`. The
+engine fits services with stable `<label>: <value>` stdout markers —
+adapt entrypoint/verb/markers (here `/svc`, `perft`, `nodes/time/nps`).
+The median/gate/JSON logic ports untouched.
 
 ```sh
 ./bench/bench.sh                    # default image shahmat-svc:bench

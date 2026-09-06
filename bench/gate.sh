@@ -1,8 +1,8 @@
 #!/bin/sh
 # Full gate: exact perft counts via CLI + cargo tests
 # Usage: gate.sh <svc-binary>
-# Universal shape: CHECKS data below, one chk() engine. Port by replacing
-# the data lines (keep the "<flags>|<fen>|<depth>|<expected>|<label>" shape).
+# Porting: the chk() calls below are the data — copy the file, replace the
+# FEN vars + chk lines (shape: chk ["flags"] <fen> <depth> <expected> <label>).
 set -u
 BIN=${1:-./target/release/shahmat-svc}
 fail=0
@@ -36,7 +36,16 @@ chk "" "$P6" 5 164075551 P6-d5
 chk "" "$E1" 4 53486 E1-d4
 chk "--no-bulk" "$SP" 5 4865609 nobulk-sp-d5
 chk "--no-bulk" "$KIWI" 4 4085603 nobulk-kiwi-d4
-# divide rows must sum to the d3 total (self-consistency of move labels)
-dsum=$("$BIN" perft "$SP" 3 --divide 2>/dev/null | awk -F': ' '/:/&&!/^nodes:/&&!/^time:/&&!/^nps:/{s+=$2} /^nodes:/{n=$2} END{print s-n}')
-[ "$dsum" = 0 ] && echo "ok   divide-sp-d3: rows sum to total" || { echo "FAIL divide-sp-d3: rows off by $dsum"; fail=1; }
+# divide rows must sum to the d3 total (self-consistency of move labels).
+# All three values required: empty output (crashed/unsupported flag) must
+# fail, never pass vacuously.
+dout=$("$BIN" perft "$SP" 3 --divide 2>/dev/null)
+dstat=$(printf '%s' "$dout" | awk -F': ' '/:/&&!/^nodes:/&&!/^time:/&&!/^nps:/{s+=$2; c+=1} /^nodes:/{n=$2} END{print c+0, s-n, n}')
+set -- $dstat
+if [ "$1" -gt 0 ] && [ -n "$3" ] && [ "$2" = 0 ]; then
+  echo "ok   divide-sp-d3: $1 rows sum to $3"
+else
+  echo "FAIL divide-sp-d3: rows=$1 diff=$2 total=${3:-<missing>}"
+  fail=1
+fi
 exit $fail
