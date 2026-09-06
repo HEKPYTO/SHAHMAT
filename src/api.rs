@@ -1,4 +1,9 @@
-//! Usable game API (core subset).
+//! FIDE game-over layer (strict Laws of Chess): checkmate, stalemate, and
+//! draws — fifty-move (claimable) / seventy-five-move (automatic), threefold
+//! (claimable) / fivefold (automatic) repetition, and dead positions (bare
+//! kings, minor vs bare king, same-colored-bishop endings). Repetition rides
+//! a per-ply Zobrist history; adjudication costs nothing in movegen/perft
+//! (game layer only) and switches off via [`Game::without_adjudication`].
 //!
 //! [`Game`] owns a [`Board`] plus the per-ply history
 //! needed for [`Game::undo`], a header map, and the initial FEN. Load a FEN
@@ -7,11 +12,14 @@
 //! ([`Game::moves_san`]/[`Game::moves_verbose`]), and export
 //! ([`Game::fen`]/[`Game::to_pgn`]).
 //!
-//! ## Scope (core goal)
+//! ## Scope
 //!
-//! - No draws of any kind: no fifty-move rule, no threefold repetition,
-//!   no insufficient material, no draw claims or offers. [`Game::is_game_over`]
-//!   is checkmate or stalemate only, and [`Game::to_pgn`] always ends `*`.
+//! - FIDE game-over only: [`Game::is_game_over`] is checkmate, stalemate, or
+//!   an automatic draw (seventy-five moves, fivefold repetition, dead
+//!   position). Claimable draws (fifty moves, threefold) are reported as
+//!   facts ([`Game::is_fifty_move_rule`], [`Game::is_threefold_repetition`])
+//!   for the caller to claim — the lib never claims on a player's behalf.
+//!   [`Game::without_adjudication`] restores bare mate/stalemate mode.
 //! - No board editing: no piece placement, removal, or clearing, no loading
 //!   moves into an arbitrary position. Games start from
 //!   [`STARTPOS`] or a FEN via [`Game::from_fen`]/
@@ -19,7 +27,7 @@
 //! - Move numbering in [`Game::to_pgn`] always starts at 1 (fullmove is not
 //!   stored by FEN render, which always emits `1`).
 
-use crate::board::{Board, Move, StateInfo};
+use crate::board::{board_hash, Board, Move, StateInfo};
 use crate::fen::{self, STARTPOS};
 use crate::movegen::{generate_legal, has_legal, is_in_check, make, unmake, MoveList};
 use crate::pgn::{self, PgnError};
@@ -97,6 +105,11 @@ pub struct VerboseMove {
 pub struct Game {
     board: Board,
     history: Vec<(Move, StateInfo, String)>,
+    /// Zobrist history: initial position hash plus one per ply, mirroring
+    /// `history` (repetition counts over these; see [`Game::repetition_count`]).
+    hashes: Vec<u64>,
+    /// FIDE adjudication switch (draws only — mate/stalemate always apply).
+    adjudicate: bool,
     headers: BTreeMap<String, String>,
     initial_fen: String,
 }
@@ -174,21 +187,47 @@ fn promo_code(ch: char) -> Option<u8> {
 }
 
 impl Game {
-    /// Startpos game with empty headers.
+    /// Startpos game with empty headers (FIDE adjudication on).
     pub fn new() -> Game {
+        let board = fen::parse(STARTPOS).expect("STARTPOS parses");
+        let hashes = vec![board_hash(&board)];
         Game {
-            board: fen::parse(STARTPOS).expect("STARTPOS parses"),
+            board,
             history: Vec::new(),
+            hashes,
+            adjudicate: true,
             headers: BTreeMap::new(),
             initial_fen: STARTPOS.to_string(),
         }
     }
 
+    /// Bare mate/stalemate mode: draw adjudication off (perft-shaped purity;
+    /// movegen/perft never adjudicate either way).
+    pub fn without_adjudication() -> Game {
+        let mut g = Game::new();
+        g.adjudicate = false;
+        g
+    }
+
+    /// FIDE draw adjudication on (`true` by default; `false` after
+    /// [`Game::without_adjudication`] or [`Game::set_adjudication`]).
+    pub fn adjudication(&self) -> bool {
+        self.adjudicate
+    }
+
+    /// Switch FIDE draw adjudication on/off (mate/stalemate unaffected).
+    pub fn set_adjudication(&mut self, on: bool) {
+        self.adjudicate = on;
+    }
     /// Game from a FEN string (also becomes the [`Game::reset`] target).
     pub fn from_fen(fen_str: &str) -> Result<Game, GameError> {
+        let board = fen::parse(fen_str)?;
+        let hashes = vec![board_hash(&board)];
         Ok(Game {
-            board: fen::parse(fen_str)?,
+            board,
             history: Vec::new(),
+            hashes,
+            adjudicate: true,
             headers: BTreeMap::new(),
             initial_fen: fen_str.to_string(),
         })
@@ -395,6 +434,7 @@ impl Game {
         let san = self.san_of_move(mv);
         let undo = make(&mut self.board, mv);
         self.history.push((mv, undo, san.clone()));
+        self.hashes.push(board_hash(&self.board));
         Ok(san)
     }
 
@@ -402,6 +442,7 @@ impl Game {
     pub fn undo(&mut self) -> Option<String> {
         let (mv, undo, san) = self.history.pop()?;
         unmake(&mut self.board, undo, mv);
+        self.hashes.pop();
         Some(san)
     }
 
@@ -433,9 +474,99 @@ impl Game {
         !has_legal(&mut copy, self.turn() == 'w')
     }
 
-    /// Checkmate or stalemate (no draws exist in the core subset).
+    /// Checkmate, stalemate, or an automatic FIDE draw (seventy-five moves,
+    /// fivefold repetition, dead position). Claimable draws (fifty moves,
+    /// threefold) are facts for the caller to claim, never automatic here.
     pub fn is_game_over(&self) -> bool {
-        self.is_checkmate() || self.is_stalemate()
+        self.is_checkmate()
+            || self.is_stalemate()
+            || (self.adjudicate
+                && (self.is_seventy_five_move_rule()
+                    || self.is_fivefold_repetition()
+                    || self.is_dead_position()))
+    }
+
+    /// Drawn game: stalemate or any automatic FIDE draw (same set as
+    /// [`Game::is_game_over`] minus checkmate). Claimable draws excluded.
+    pub fn is_draw(&self) -> bool {
+        self.is_stalemate()
+            || (self.adjudicate
+                && (self.is_seventy_five_move_rule()
+                    || self.is_fivefold_repetition()
+                    || self.is_dead_position()))
+    }
+
+    /// Halfmove clock (plies since last pawn move or capture).
+    fn halfmove(&self) -> u64 {
+        (self.board.state[0] >> 12) & 0x3fff
+    }
+
+    /// Fifty-move rule claimable: 100+ halfmoves. A fact for the player to
+    /// claim — never automatic in [`Game::is_game_over`].
+    pub fn is_fifty_move_rule(&self) -> bool {
+        self.adjudicate && self.halfmove() >= 100
+    }
+
+    /// Seventy-five-move rule: 150+ halfmoves, automatic draw.
+    pub fn is_seventy_five_move_rule(&self) -> bool {
+        self.adjudicate && self.halfmove() >= 150
+    }
+
+    /// Occurrences of the current position in this game (initial plus one
+    /// per ply). Keys are full-recompute Zobrist hashes (pieces + side to
+    /// move + rights + EP square): a dead EP square (no legal EP capture)
+    /// still hashes distinctly, so rare repetitions through dead EP squares
+    /// can undercount — errs toward fewer draws, never phantom ones.
+    pub fn repetition_count(&self) -> u8 {
+        let cur = board_hash(&self.board);
+        self.hashes.iter().filter(|&&h| h == cur).count().min(255) as u8
+    }
+
+    /// Threefold repetition claimable: current position occurred 3+ times.
+    /// A fact for the player to claim — never automatic here.
+    pub fn is_threefold_repetition(&self) -> bool {
+        self.adjudicate && self.repetition_count() >= 3
+    }
+
+    /// Fivefold repetition: current position occurred 5+ times, automatic.
+    pub fn is_fivefold_repetition(&self) -> bool {
+        self.adjudicate && self.repetition_count() >= 5
+    }
+
+    /// Dead position (FIDE 5.2.2 known cases): neither side can possibly
+    /// mate — bare kings; minor (bishop/knight) vs bare king; bishop vs
+    /// bishop on same-colored squares. Opposite-colored bishops can mate,
+    /// so they are NOT dead. Wider dead-position search is out of scope.
+    pub fn is_dead_position(&self) -> bool {
+        if !self.adjudicate {
+            return false;
+        }
+        let o = &self.board.occupancies;
+        // Any pawn, rook, or queen mates trivially — only minor-piece shells.
+        if o[0] | o[3] | o[4] != 0 {
+            return false;
+        }
+        let minor = o[1] | o[2];
+        let loco = minor.count_ones();
+        if loco == 0 {
+            return true; // bare kings
+        }
+        if loco == 1 {
+            // Single bishop or knight vs bare king.
+            return true;
+        }
+        if loco == 2 && o[1] == 0 {
+            // Two bishops, one each side, on same-colored squares.
+            let b = o[2];
+            let w = o[6] & b;
+            let bl = o[7] & b;
+            if w.count_ones() == 1 && bl.count_ones() == 1 {
+                let wsq = w.trailing_zeros();
+                let bsq = bl.trailing_zeros();
+                return (wsq + (wsq >> 3)) & 1 == (bsq + (bsq >> 3)) & 1;
+            }
+        }
+        false
     }
 
     /// Back to the initial FEN with empty history (headers kept).
@@ -444,6 +575,7 @@ impl Game {
             self.board = board;
         }
         self.history.clear();
+        self.hashes = vec![board_hash(&self.board)];
     }
 
     /// Load a new FEN: clears history, keeps headers, and becomes the new
@@ -451,6 +583,7 @@ impl Game {
     pub fn load_fen(&mut self, fen_str: &str) -> Result<(), GameError> {
         self.board = fen::parse(fen_str)?;
         self.history.clear();
+        self.hashes = vec![board_hash(&self.board)];
         self.initial_fen = fen_str.to_string();
         Ok(())
     }
@@ -515,6 +648,7 @@ impl Game {
         self.board = fen::parse(&start)?;
         self.initial_fen = start;
         self.history.clear();
+        self.hashes = vec![board_hash(&self.board)];
         self.headers.clear();
         for (name, value) in &game.tags {
             self.headers.insert(name.clone(), value.clone());
