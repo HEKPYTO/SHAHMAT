@@ -17,6 +17,7 @@ RUN --mount=type=cache,target=/var/cache/cargo,sharing=locked \
 # musl static targets for the Alpine dist (layer cached until the Dockerfile
 # above changes; zero C code, so rust-lld self-contained linking needs no
 # musl-tools).
+RUN rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl && rustup component add llvm-tools-preview
 # PGO: instrument → train (startpos d6 + Kiwipete d5 + pos4 d6) → merge →
 # optimized. Distinct profraw per train run so the merge blends all three
 # (same-binary %m collides).
