@@ -37,18 +37,18 @@
 //!
 //! ## Fully-legal core (no make/unmake in the legality path)
 //!
-//! One generic generator ([`generate_moves_into`]) feeds a [`MoveSink`]:
+//! One generic generator (`generate_moves_into`) feeds a [`MoveSink`]:
 //! [`MoveList`] materialises moves, [`MoveCounter`] collapses each target
 //! set to a popcount (the perft-leaf fast path never runs `trailing_zeros`
 //! / `push` loops). Same code path, same totals — the fork is gone.
 //!
 //! Per node, in order:
 //!
-//! 1. `checkers` — enemy pieces attacking our king ([`attackers_to`]).
-//! 2. `king_danger` — every square attacked by the enemy with our king
-//!    removed ([`enemy_attacks`]); lazy — a boxed king with no castling
-//!    rights skips the enemy-side scan. King moves are restricted to
-//!    squares outside this mask.
+//! 1. `checkers` + split pins from one king-ray pass (`checkers_and_pins`).
+//! 2. `king_danger` — per-destination early-exit probes with our king
+//!    removed; a boxed king skips all enemy-side attack work. King moves
+//!    are restricted to squares outside this mask.
+//!    (No bulk enemy-side scan: only the <= 8 king destinations matter.)
 //! 3. `check_mask` — whole board when calm; the checker square (+ the
 //!    interposition ray for sliders) under single check. Double check
 //!    emits king moves only.
@@ -378,20 +378,55 @@ pub fn is_attacked(b: &Board, sq: u8, by_white: bool) -> bool {
     is_attacked_occ(b, sq, by_white, b.occupancies[OCC])
 }
 
-/// Attacker set: enemy pieces attacking `sq` under occupancy `occ`.
+/// Checker set plus split pin masks from a single king-ray pass.
 ///
-/// Union form of [`is_attacked_occ`] for check evasion: the caller needs the
-/// checker squares (single vs double check, check-mask construction), not
-/// just the boolean.
-fn attackers_to(b: &Board, sq: u8, by_white: bool, occ: u64) -> u64 {
-    let own = colour_bb(b, by_white);
-    let atk = PAWN_ATK[if by_white { 0 } else { 1 }][sq as usize];
-    let mut set = b.occupancies[PAWN] & own & atk;
-    set |= knight_attacks(sq) & b.occupancies[KNIGHT] & own;
-    set |= king_attacks(sq) & b.occupancies[KING] & own;
-    set |= bishop_attacks(sq, occ) & (b.occupancies[BISHOP] | b.occupancies[QUEEN]) & own;
-    set |= rook_attacks(sq, occ) & (b.occupancies[ROOK] | b.occupancies[QUEEN]) & own;
-    set
+/// Enemy sliders seeing the king through `foe`-only occupancy are snipers:
+/// a sniper with nothing between is a direct checker (the foe-only ray
+/// implies the live ray is equally open), one with a single own piece
+/// between pins it. Every live-occupancy slider checker is such a sniper
+/// (clearing blockers only extends rays), so this is exact. Leaper
+/// checkers come from tables as before. Returns
+/// `(checkers, pinned_hv, pinned_diag)`; pin masks are ignored by the
+/// caller under double check.
+fn checkers_and_pins(
+    b: &Board,
+    ksq: u8,
+    occ: u64,
+    own: u64,
+    foe: u64,
+    foe_is_white: bool,
+) -> (u64, u64, u64) {
+    let atk = PAWN_ATK[if foe_is_white { 0 } else { 1 }][ksq as usize];
+    let mut checkers = b.occupancies[PAWN] & foe & atk;
+    checkers |= knight_attacks(ksq) & b.occupancies[KNIGHT] & foe;
+    checkers |= king_attacks(ksq) & b.occupancies[KING] & foe;
+    let foe_diag = (b.occupancies[BISHOP] | b.occupancies[QUEEN]) & foe;
+    let foe_orth = (b.occupancies[ROOK] | b.occupancies[QUEEN]) & foe;
+    let mut pinned_diag = 0u64;
+    let mut diag = bishop_attacks(ksq, foe) & foe_diag;
+    while diag != 0 {
+        let s = diag.trailing_zeros() as u8;
+        diag &= diag - 1;
+        let between = between_squares(ksq, s) & occ;
+        if between == 0 {
+            checkers |= 1u64 << s;
+        } else if between.count_ones() == 1 && between & own != 0 {
+            pinned_diag |= between;
+        }
+    }
+    let mut pinned_hv = 0u64;
+    let mut orth = rook_attacks(ksq, foe) & foe_orth;
+    while orth != 0 {
+        let s = orth.trailing_zeros() as u8;
+        orth &= orth - 1;
+        let between = between_squares(ksq, s) & occ;
+        if between == 0 {
+            checkers |= 1u64 << s;
+        } else if between.count_ones() == 1 && between & own != 0 {
+            pinned_hv |= between;
+        }
+    }
+    (checkers, pinned_hv, pinned_diag)
 }
 
 /// All squares strictly between `a` and `b` (aligned by construction: the
@@ -632,33 +667,39 @@ fn generate_moves_into<S: MoveSink>(b: &Board, sink: &mut S) {
     // 64 when absent; only consumed on paths that require a king.
     let ksq = king_bb.trailing_zeros() as u8;
     //
-    // 1. Checkers: enemy pieces attacking our king.
-    let checkers = if have_king {
-        attackers_to(b, ksq, !white, occ)
+    // 1. Checkers + split pins from one king-ray pass (pin masks ignored
+    // under double check: king moves only).
+    let (checkers, pinned_hv, pinned_diag) = if have_king {
+        checkers_and_pins(b, ksq, occ, own, foe, !white)
     } else {
-        0
+        (0, 0, 0)
     };
     let n = checkers.count_ones();
     //
-    // 2. King destinations. The danger scan is lazy: a boxed king with no
-    // castling rights skips the whole enemy-side attack computation.
     let king_raw = if have_king {
         king_attacks(ksq) & !own
     } else {
         0
     };
-    let may_castle = n == 0
-        && if white {
-            b.state[0] & (WK | WQ) != 0
-        } else {
-            b.state[0] & (BK | BQ) != 0
-        };
-    let danger = if have_king && (king_raw != 0 || may_castle) {
-        enemy_attacks(b, white, occ ^ (1u64 << ksq))
-    } else {
-        0
-    };
-    let king_targets = king_raw & !danger;
+    //
+    // 2. King destinations, probed lazily per square. Only `king_raw`
+    // (<= 8 squares) is ever consumed, so each destination gets an
+    // early-exit `is_attacked_occ` probe instead of scanning every enemy
+    // slider into a full-board danger mask. A boxed king (`king_raw == 0`)
+    // skips all attack work, castling rights or not (castling tests its
+    // own squares in `castle_*_ok`).
+    let mut king_targets = 0u64;
+    if have_king && king_raw != 0 {
+        let occ_wo_king = occ ^ (1u64 << ksq);
+        let mut dests = king_raw;
+        while dests != 0 {
+            let d = dests.trailing_zeros() as u8;
+            dests &= dests - 1;
+            if !is_attacked_occ(b, d, !white, occ_wo_king) {
+                king_targets |= 1u64 << d;
+            }
+        }
+    }
     //
     // 3. Evasion mask: whole board when calm; checker (+ interposition ray
     // for sliders) under single check; empty under double check (king only).
@@ -676,13 +717,6 @@ fn generate_moves_into<S: MoveSink>(b: &Board, sink: &mut S) {
         !0u64
     } else {
         0u64
-    };
-    //
-    // 4. Split pin masks (needless under double check: king moves only).
-    let (pinned_hv, pinned_diag) = if have_king && n < 2 {
-        compute_pinned_split(b, ksq, occ, own, foe)
-    } else {
-        (0, 0)
     };
     //
     // 5. Non-king emission in canonical group order.
@@ -733,89 +767,62 @@ fn generate_moves_into<S: MoveSink>(b: &Board, sink: &mut S) {
         return;
     }
     if n == 0 {
-        if castle_short_ok(b, white, occ) {
-            sink.push_one(Move::new(
-                if white { 4 } else { 60 },
-                if white { 6 } else { 62 },
-                0,
-                true,
-            ));
-        }
-        if castle_long_ok(b, white, occ) {
-            sink.push_one(Move::new(
-                if white { 4 } else { 60 },
-                if white { 2 } else { 58 },
-                0,
-                true,
-            ));
-        }
+        emit_castles(b, white, occ, sink);
     }
 }
 //
-/// Every square attacked by the enemy under `occ` (bulk danger mask for
-/// king destinations). Pawns shift bit-parallel; leapers table-probe;
-/// sliders query per piece.
-fn enemy_attacks(b: &Board, white: bool, occ: u64) -> u64 {
-    let foe = colour_bb(b, !white);
-    let foe_pawns = b.occupancies[PAWN] & foe;
-    let mut attacks = if white {
-        ((foe_pawns & !FILE_A) >> 9) | ((foe_pawns & !FILE_H) >> 7)
+/// Castling emission (calm only, K then Q): one rights gate, per-side
+/// emptiness, then a single shared king-square probe (both castles need
+/// it) followed by the transit probes. Same move set as `castle_short_ok`
+/// + `castle_long_ok` (test-only oracle helpers) — the e-square test is
+/// shared instead of repeated.
+#[inline(always)]
+fn emit_castles<S: MoveSink>(b: &Board, white: bool, occ: u64, sink: &mut S) {
+    if white {
+        let rights = b.state[0] & (WK | WQ);
+        if rights == 0 {
+            return;
+        }
+        let short_open = rights & WK != 0 && occ & ((1u64 << 5) | (1u64 << 6)) == 0;
+        let long_open = rights & WQ != 0 && occ & ((1u64 << 1) | (1u64 << 2) | (1u64 << 3)) == 0;
+        if !short_open && !long_open {
+            return;
+        }
+        if is_attacked(b, 4, false) {
+            return;
+        }
+        if short_open && !is_attacked(b, 5, false) && !is_attacked(b, 6, false) {
+            sink.push_one(Move::new(4, 6, 0, true));
+        }
+        if sink.done() {
+            return;
+        }
+        if long_open && !is_attacked(b, 3, false) && !is_attacked(b, 2, false) {
+            sink.push_one(Move::new(4, 2, 0, true));
+        }
     } else {
-        ((foe_pawns & !FILE_A) << 7) | ((foe_pawns & !FILE_H) << 9)
-    };
-    let mut knights = b.occupancies[KNIGHT] & foe;
-    while knights != 0 {
-        let s = knights.trailing_zeros() as u8;
-        knights &= knights - 1;
-        attacks |= knight_attacks(s);
-    }
-    let foe_king = b.occupancies[KING] & foe;
-    if foe_king != 0 {
-        attacks |= king_attacks(foe_king.trailing_zeros() as u8);
-    }
-    let mut bq = (b.occupancies[BISHOP] | b.occupancies[QUEEN]) & foe;
-    while bq != 0 {
-        let s = bq.trailing_zeros() as u8;
-        bq &= bq - 1;
-        attacks |= bishop_attacks(s, occ);
-    }
-    let mut rq = (b.occupancies[ROOK] | b.occupancies[QUEEN]) & foe;
-    while rq != 0 {
-        let s = rq.trailing_zeros() as u8;
-        rq &= rq - 1;
-        attacks |= rook_attacks(s, occ);
-    }
-    attacks
-}
-//
-/// Split pin masks via the sniper method: enemy sliders that see the king
-/// through `foe`-only occupancy, with exactly one own piece between, pin
-/// it. Returns `(pinned_hv, pinned_diag)`; a piece sits on at most one ray
-/// from the king, so the masks are disjoint by construction.
-fn compute_pinned_split(b: &Board, ksq: u8, occ: u64, own: u64, foe: u64) -> (u64, u64) {
-    let foe_diag = (b.occupancies[BISHOP] | b.occupancies[QUEEN]) & foe;
-    let foe_orth = (b.occupancies[ROOK] | b.occupancies[QUEEN]) & foe;
-    let mut pinned_diag = 0u64;
-    let mut diag = bishop_attacks(ksq, foe) & foe_diag;
-    while diag != 0 {
-        let s = diag.trailing_zeros() as u8;
-        diag &= diag - 1;
-        let between = between_squares(ksq, s) & occ;
-        if between.count_ones() == 1 && between & own != 0 {
-            pinned_diag |= between;
+        let rights = b.state[0] & (BK | BQ);
+        if rights == 0 {
+            return;
+        }
+        let short_open = rights & BK != 0 && occ & ((1u64 << 61) | (1u64 << 62)) == 0;
+        let long_open = rights & BQ != 0 && occ & ((1u64 << 57) | (1u64 << 58) | (1u64 << 59)) == 0;
+        if !short_open && !long_open {
+            return;
+        }
+        if is_attacked(b, 60, true) {
+            return;
+        }
+        if short_open && !is_attacked(b, 61, true) && !is_attacked(b, 62, true) {
+            sink.push_one(Move::new(60, 62, 0, true));
+        }
+        if sink.done() {
+            return;
+        }
+        if long_open && !is_attacked(b, 59, true) && !is_attacked(b, 58, true) {
+            sink.push_one(Move::new(60, 58, 0, true));
         }
     }
-    let mut pinned_hv = 0u64;
-    let mut orth = rook_attacks(ksq, foe) & foe_orth;
-    while orth != 0 {
-        let s = orth.trailing_zeros() as u8;
-        orth &= orth - 1;
-        let between = between_squares(ksq, s) & occ;
-        if between.count_ones() == 1 && between & own != 0 {
-            pinned_hv |= between;
-        }
-    }
-    (pinned_hv, pinned_diag)
 }
 //
 /// Full line through `a` and `b` (aligned by construction), excluding `a`.
@@ -1287,7 +1294,7 @@ impl<'a> PawnCap<'a> {
 /// Short-castle legality (rights + emptiness + no-in/through-check).
 /// King-destination safety holds with the live occupancy: any enemy ray to
 /// the destination that the king's departure would unblock passes through
-/// the king square first, so the in-check test below already rejects it.
+#[cfg(test)]
 fn castle_short_ok(b: &Board, white: bool, occ: u64) -> bool {
     let rights = b.state[0];
     if white {
@@ -1307,7 +1314,8 @@ fn castle_short_ok(b: &Board, white: bool, occ: u64) -> bool {
     }
 }
 
-/// Long-castle legality (same contract as [`castle_short_ok`]).
+/// Long-castle legality (same contract as `castle_short_ok`).
+#[cfg(test)]
 fn castle_long_ok(b: &Board, white: bool, occ: u64) -> bool {
     let rights = b.state[0];
     if white {
