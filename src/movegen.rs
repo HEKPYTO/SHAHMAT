@@ -226,6 +226,21 @@ fn colour_bb(b: &Board, white: bool) -> u64 {
 fn piece_bb(b: &Board, white: bool, piece: usize) -> u64 {
     b.occupancies[piece] & colour_bb(b, white)
 }
+//
+/// Const-colour mirrors of [`colour_bb`]/[`piece_bb`] for the templated
+/// generator: with `WHITE` known at compile time the occupancy index folds
+/// to an immediate. Indices pinned to the `Board` layout (6 white, 7 black);
+/// kept as literals because the `WHITE`/`BLACK` const names are shadowed by
+/// the generic parameter.
+#[inline(always)]
+fn colour_bb_c<const WHITE: bool>(b: &Board) -> u64 {
+    b.occupancies[if WHITE { 6 } else { 7 }]
+}
+
+#[inline(always)]
+fn piece_bb_c<const WHITE: bool>(b: &Board, piece: usize) -> u64 {
+    b.occupancies[piece] & colour_bb_c::<WHITE>(b)
+}
 
 // ---------------------------------------------------------------------------
 // Leap attacks (precomputed tables; `leap` stays as the test-only oracle).
@@ -594,7 +609,11 @@ impl MoveSink for MoveCounter {
 /// historical call-site compatibility; the board is never mutated.
 pub fn generate_legal(b: &mut Board, list: &mut MoveList) {
     list.len = 0;
-    generate_moves_into(b, list);
+    if stm_white(b) {
+        generate_moves_into::<_, true>(b, list);
+    } else {
+        generate_moves_into::<_, false>(b, list);
+    }
 }
 //
 /// Number of fully legal moves for the side to move, without materialising
@@ -603,7 +622,11 @@ pub fn generate_legal(b: &mut Board, list: &mut MoveList) {
 /// the board is never mutated.
 pub fn count_legal(b: &mut Board) -> u32 {
     let mut counter = MoveCounter::new();
-    generate_moves_into(b, &mut counter);
+    if stm_white(b) {
+        generate_moves_into::<_, true>(b, &mut counter);
+    } else {
+        generate_moves_into::<_, false>(b, &mut counter);
+    }
     counter.get()
 }
 //
@@ -616,7 +639,11 @@ pub fn count_legal(b: &mut Board) -> u32 {
 pub fn has_legal(b: &mut Board, white: bool) -> bool {
     debug_assert_eq!(stm_white(b), white);
     let mut probe = HasLegal { found: false };
-    generate_moves_into(b, &mut probe);
+    if white {
+        generate_moves_into::<_, true>(b, &mut probe);
+    } else {
+        generate_moves_into::<_, false>(b, &mut probe);
+    }
     probe.found
 }
 //
@@ -654,15 +681,16 @@ impl MoveSink for HasLegal {
 }
 //
 /// Core generator: checkers → lazy king-danger → check mask → split pins →
-/// masked emission in canonical group order. Monomorphised per sink, so the
-/// materialise/count choice costs no dispatch.
+/// masked emission in canonical group order. Monomorphised per sink and per
+/// side to move (const `WHITE`, dispatched once in `generate_legal`,
+/// `count_legal`, `has_legal`), so the materialise/count choice and the
+/// colour branches cost no dispatch.
 #[inline(always)]
-fn generate_moves_into<S: MoveSink>(b: &Board, sink: &mut S) {
-    let white = stm_white(b);
+fn generate_moves_into<S: MoveSink, const WHITE: bool>(b: &Board, sink: &mut S) {
     let occ = b.occupancies[OCC];
-    let own = colour_bb(b, white);
-    let foe = colour_bb(b, !white);
-    let king_bb = piece_bb(b, white, KING);
+    let own = colour_bb_c::<WHITE>(b);
+    let foe = b.occupancies[if WHITE { 7 } else { 6 }];
+    let king_bb = piece_bb_c::<WHITE>(b, KING);
     let have_king = king_bb != 0;
     // 64 when absent; only consumed on paths that require a king.
     let ksq = king_bb.trailing_zeros() as u8;
@@ -670,7 +698,7 @@ fn generate_moves_into<S: MoveSink>(b: &Board, sink: &mut S) {
     // 1. Checkers + split pins from one king-ray pass (pin masks ignored
     // under double check: king moves only).
     let (checkers, pinned_hv, pinned_diag) = if have_king {
-        checkers_and_pins(b, ksq, occ, own, foe, !white)
+        checkers_and_pins(b, ksq, occ, own, foe, !WHITE)
     } else {
         (0, 0, 0)
     };
@@ -695,7 +723,7 @@ fn generate_moves_into<S: MoveSink>(b: &Board, sink: &mut S) {
         while dests != 0 {
             let d = dests.trailing_zeros() as u8;
             dests &= dests - 1;
-            if !is_attacked_occ(b, d, !white, occ_wo_king) {
+            if !is_attacked_occ(b, d, !WHITE, occ_wo_king) {
                 king_targets |= 1u64 << d;
             }
         }
@@ -721,9 +749,8 @@ fn generate_moves_into<S: MoveSink>(b: &Board, sink: &mut S) {
     //
     // 5. Non-king emission in canonical group order.
     if n < 2 {
-        emit_pawn_moves(
+        emit_pawn_moves::<_, WHITE>(
             b,
-            white,
             ksq,
             have_king,
             pinned_hv,
@@ -736,21 +763,11 @@ fn generate_moves_into<S: MoveSink>(b: &Board, sink: &mut S) {
         if sink.done() {
             return;
         }
-        emit_knight_moves(b, white, pinned_hv | pinned_diag, check_mask, own, sink);
+        emit_knight_moves::<_, WHITE>(b, pinned_hv | pinned_diag, check_mask, own, sink);
         if sink.done() {
             return;
         }
-        emit_slider_moves(
-            b,
-            white,
-            ksq,
-            pinned_hv,
-            pinned_diag,
-            check_mask,
-            occ,
-            own,
-            sink,
-        );
+        emit_slider_moves::<_, WHITE>(b, ksq, pinned_hv, pinned_diag, check_mask, occ, own, sink);
         if sink.done() {
             return;
         }
@@ -767,7 +784,7 @@ fn generate_moves_into<S: MoveSink>(b: &Board, sink: &mut S) {
         return;
     }
     if n == 0 {
-        emit_castles(b, white, occ, sink);
+        emit_castles::<_, WHITE>(b, occ, sink);
     }
 }
 //
@@ -777,8 +794,8 @@ fn generate_moves_into<S: MoveSink>(b: &Board, sink: &mut S) {
 /// + `castle_long_ok` (test-only oracle helpers) — the e-square test is
 ///   shared instead of repeated.
 #[inline(always)]
-fn emit_castles<S: MoveSink>(b: &Board, white: bool, occ: u64, sink: &mut S) {
-    if white {
+fn emit_castles<S: MoveSink, const WHITE: bool>(b: &Board, occ: u64, sink: &mut S) {
+    if WHITE {
         let rights = b.state[0] & (WK | WQ);
         if rights == 0 {
             return;
@@ -855,15 +872,14 @@ fn line_through(a: u8, b: u8) -> u64 {
 /// Knight moves: pinned knights can never move (every knight step leaves
 /// any pin line), so they are dropped up front.
 #[inline(always)]
-fn emit_knight_moves<S: MoveSink>(
+fn emit_knight_moves<S: MoveSink, const WHITE: bool>(
     b: &Board,
-    white: bool,
     pinned: u64,
     check_mask: u64,
     own: u64,
     sink: &mut S,
 ) {
-    let mut knights = piece_bb(b, white, KNIGHT) & !pinned;
+    let mut knights = piece_bb_c::<WHITE>(b, KNIGHT) & !pinned;
     while knights != 0 {
         let from = knights.trailing_zeros() as u8;
         knights &= knights - 1;
@@ -878,9 +894,8 @@ fn emit_knight_moves<S: MoveSink>(
 /// attack set already stops at (a capture of) the sniper.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn emit_slider_moves<S: MoveSink>(
+fn emit_slider_moves<S: MoveSink, const WHITE: bool>(
     b: &Board,
-    white: bool,
     ksq: u8,
     pinned_hv: u64,
     pinned_diag: u64,
@@ -889,7 +904,7 @@ fn emit_slider_moves<S: MoveSink>(
     own: u64,
     sink: &mut S,
 ) {
-    let mut bishops = piece_bb(b, white, BISHOP) & !pinned_hv;
+    let mut bishops = piece_bb_c::<WHITE>(b, BISHOP) & !pinned_hv;
     while bishops != 0 {
         let from = bishops.trailing_zeros() as u8;
         bishops &= bishops - 1;
@@ -902,7 +917,7 @@ fn emit_slider_moves<S: MoveSink>(
     if sink.done() {
         return;
     }
-    let mut rooks = piece_bb(b, white, ROOK) & !pinned_diag;
+    let mut rooks = piece_bb_c::<WHITE>(b, ROOK) & !pinned_diag;
     while rooks != 0 {
         let from = rooks.trailing_zeros() as u8;
         rooks &= rooks - 1;
@@ -915,7 +930,7 @@ fn emit_slider_moves<S: MoveSink>(
     if sink.done() {
         return;
     }
-    let mut queens = piece_bb(b, white, QUEEN);
+    let mut queens = piece_bb_c::<WHITE>(b, QUEEN);
     while queens != 0 {
         let from = queens.trailing_zeros() as u8;
         queens &= queens - 1;
@@ -934,9 +949,8 @@ fn emit_slider_moves<S: MoveSink>(
 /// a king).
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn emit_pawn_moves<S: MoveSink>(
+fn emit_pawn_moves<S: MoveSink, const WHITE: bool>(
     b: &Board,
-    white: bool,
     ksq: u8,
     have_king: bool,
     pinned_hv: u64,
@@ -946,13 +960,13 @@ fn emit_pawn_moves<S: MoveSink>(
     enemy: u64,
     sink: &mut S,
 ) {
-    let pawns = piece_bb(b, white, PAWN);
+    let pawns = piece_bb_c::<WHITE>(b, PAWN);
     if pawns == 0 {
         return;
     }
     let empty = !occ;
-    let promo_rank = if white { RANK_8 } else { RANK_1 };
-    let (single_raw, dbl_targets, cap_l, cap_r, push, dbl, off_l, off_r) = if white {
+    let promo_rank = if WHITE { RANK_8 } else { RANK_1 };
+    let (single_raw, dbl_targets, cap_l, cap_r, push, dbl, off_l, off_r) = if WHITE {
         let single = (pawns << 8) & empty;
         let dbl = ((single & RANK_3) << 8) & empty & check_mask;
         let cl = ((pawns & !FILE_A) << 7) & enemy;
@@ -993,9 +1007,7 @@ fn emit_pawn_moves<S: MoveSink>(
         emit_pawn_class(sink, cap_r_np, off_r, false, false, pinned, ksq);
         emit_pawn_class(sink, cap_r_pr, off_r, true, false, pinned, ksq);
     }
-    emit_ep(
-        b, white, ksq, have_king, pinned, check_mask, occ, pawns, sink,
-    );
+    emit_ep::<_, WHITE>(b, ksq, have_king, pinned, check_mask, occ, pawns, sink);
 }
 //
 /// Pawn-target emission when something is pinned: unpinned targets emit in
@@ -1055,9 +1067,8 @@ fn emit_pawn_class<S: MoveSink>(
 /// is exact — zero makes.
 #[inline(always)]
 #[allow(clippy::too_many_arguments)]
-fn emit_ep<S: MoveSink>(
+fn emit_ep<S: MoveSink, const WHITE: bool>(
     b: &Board,
-    white: bool,
     ksq: u8,
     have_king: bool,
     pinned: u64,
@@ -1071,15 +1082,15 @@ fn emit_ep<S: MoveSink>(
         return;
     }
     let ep_bit = 1u64 << ep;
-    let mut attackers = pawns & PAWN_ATK[if white { 0 } else { 1 }][ep as usize];
+    let mut attackers = pawns & PAWN_ATK[if WHITE { 0 } else { 1 }][ep as usize];
     if attackers == 0 {
         return;
     }
-    let foe = colour_bb(b, !white);
+    let foe = b.occupancies[if WHITE { 7 } else { 6 }];
     // Victim one rank behind the EP square; required so a stray EP square
     // on a malformed FEN yields no phantom move. Safe arithmetic: genuine
     // attackers (edge-aware table above) pin `ep` to rank 6 / rank 3.
-    let cap_sq = if white { ep - 8 } else { ep + 8 };
+    let cap_sq = if WHITE { ep - 8 } else { ep + 8 };
     let cap_bit = 1u64 << cap_sq;
     if b.occupancies[PAWN] & foe & cap_bit == 0 {
         return;

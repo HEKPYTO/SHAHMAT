@@ -429,16 +429,44 @@ mod hq {
     /// h1–a8 diagonals, 512 B static.
     pub(super) static ANTI: [u64; 64] = build(3);
 
+    /// Shared HQ line core: `r`-derived quantities (`2r`, `2·reverse(r)`,
+    /// `!r`) are passed in so the fused queen computes them once for all
+    /// four lines. Per-line work stays identical to [`slide`]: mask the
+    /// occupancy, one forward `rbit` round, one reverse round, xor + mask.
+    #[inline(always)]
+    fn slide_inner(occ: u64, r2: u64, rr2: u64, mask: u64, not_r: u64) -> u64 {
+        let o = occ & mask;
+        let fwd = o.wrapping_sub(r2);
+        let back = o.reverse_bits().wrapping_sub(rr2).reverse_bits();
+        (fwd ^ back) & mask & not_r
+    }
+
     #[inline(always)]
     fn slide(occ: u64, sq: u8, mask: u64) -> u64 {
-        let o = occ & mask;
         let r = 1u64 << sq;
-        let fwd = o.wrapping_sub(r.wrapping_mul(2));
-        let back = o
-            .reverse_bits()
-            .wrapping_sub(r.reverse_bits().wrapping_mul(2))
-            .reverse_bits();
-        (fwd ^ back) & mask & !r
+        slide_inner(
+            occ,
+            r.wrapping_mul(2),
+            r.reverse_bits().wrapping_mul(2),
+            mask,
+            !r,
+        )
+    }
+
+    // Only called from the HQ-arm `queen_attacks` dispatch below; gated so
+    // x86_64+pext builds (where `mod hq` compiles but the queen takes the
+    // union path) stay warning-free under `-D warnings`.
+    #[cfg(any(target_arch = "aarch64", feature = "min-mem"))]
+    #[inline(always)]
+    fn queen_inner(occ: u64, sq: u8) -> u64 {
+        let r = 1u64 << sq;
+        let r2 = r.wrapping_mul(2);
+        let rr2 = r.reverse_bits().wrapping_mul(2);
+        let not_r = !r;
+        slide_inner(occ, r2, rr2, RANK[sq as usize], not_r)
+            | slide_inner(occ, r2, rr2, FILE[sq as usize], not_r)
+            | slide_inner(occ, r2, rr2, DIAG[sq as usize], not_r)
+            | slide_inner(occ, r2, rr2, ANTI[sq as usize], not_r)
     }
 
     #[inline]
@@ -450,10 +478,19 @@ mod hq {
     pub(super) fn bishop_attacks(sq: u8, occ: u64) -> u64 {
         slide(occ, sq, DIAG[sq as usize]) | slide(occ, sq, ANTI[sq as usize])
     }
+
+    /// Fused queen: one occupancy read, `r`/`reverse(r)`/`2r`/`!r` computed
+    /// once and shared across all four lines. Saves per queen call one
+    /// dispatch layer plus 3x `rbit` + 3x mul + redundant mask/`!r` work
+    /// vs `rook_attacks | bishop_attacks`. HQ-arm only (see `queen_inner`).
+    #[cfg(any(target_arch = "aarch64", feature = "min-mem"))]
+    #[inline]
+    pub(super) fn queen_attacks(sq: u8, occ: u64) -> u64 {
+        queen_inner(occ, sq)
+    }
 }
 
 /// Arm 2 — Black fixed-shift magic.
-///
 /// Index = `((occ & mask) * magic) >> (64 - popcount(mask))` into one flat
 /// table per piece. Magics are searched once, deterministically (fixed-seed
 /// xorshift, suitability heuristic + full collision check over every
@@ -671,7 +708,7 @@ mod pext {
         let mut bit = 0u32;
         let mut m = mask;
         while m != 0 {
-            let l = m & m.wrapping_neg();
+            let l = 1u64 << m.trailing_zeros();
             if occ & l != 0 {
                 out |= 1u64 << bit;
             }
@@ -823,10 +860,20 @@ pub fn bishop_attacks(sq: u8, occ: u64) -> u64 {
     }
 }
 
-/// Queen attacks: rook ∪ bishop. Owns no tables; strictly a union helper.
+/// Queen attacks: fused single-pass HQ on the HQ arm (one occupancy read,
+/// `r`-derived quantities shared across all four lines), else rook ∪ bishop
+/// union of the resident engine. Owns no tables. Results bit-identical.
 #[inline]
 pub fn queen_attacks(sq: u8, occ: u64) -> u64 {
-    rook_attacks(sq, occ) | bishop_attacks(sq, occ)
+    check_sq(sq);
+    #[cfg(any(target_arch = "aarch64", feature = "min-mem"))]
+    {
+        hq::queen_attacks(sq, occ)
+    }
+    #[cfg(not(any(target_arch = "aarch64", feature = "min-mem")))]
+    {
+        rook_attacks(sq, occ) | bishop_attacks(sq, occ)
+    }
 }
 
 #[cfg(test)]
