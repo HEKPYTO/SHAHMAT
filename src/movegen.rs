@@ -1443,6 +1443,61 @@ pub fn multiply_ctx(b: &mut Board) -> MultiplyCtx {
         opp,
     }
 }
+
+/// Precision recheck for [`multiply_is_quiet`]: the move (from `from`,
+/// landing `to`, slider `mover`) passed every gate except `to_piece[mover]`.
+/// True iff the landing is provably quiet under real occupancy: post-move
+/// slider rays from `to` (from-square vacated, landing occupied) touch no
+/// king-relevant square (ring + king + castle transit, same construction as
+/// [`multiply_ctx`]), and the enemy king is unreachable from `to` even with
+/// foe occupancy removed (so the landing pins no foe piece against it —
+/// a same-ray foe piece the null total assumes unpinned).
+///
+/// Soundness notes: captures/promotions/castles/EP/live-double-push gates
+/// ran first (foe occupancy is unchanged, so subtracting it for the x-ray
+/// is exact); the `from` gate ran first (vacating unblocks/unpins nothing —
+/// any between-square would have failed it). Leaper landings never reach
+/// here: their `to_piece` flags are table-exact, so a flag is a real attack.
+#[cold]
+fn multiply_recheck_quiet(ctx: &MultiplyCtx, b: &Board, from: u8, to: u8, mover: usize) -> bool {
+    debug_assert!(
+        ctx.to_empty & (1u64 << to) == 0,
+        "recheck needs to_empty-clean landing"
+    );
+    let white = stm_white(b);
+    let foe = b.occupancies[if white { BLACK } else { WHITE }];
+    let ek = b.occupancies[KING] & foe;
+    if ek == 0 {
+        return false;
+    }
+    let ksq = ek.trailing_zeros() as u8;
+    let kr = (KING_TAB[ksq as usize] & !foe)
+        | (1u64 << ksq)
+        | if white { 0x6C00_0000_0000_0000 } else { 0x6C };
+    let occ = b.occupancies[OCC];
+    let occ_post = (occ ^ (1u64 << from)) | (1u64 << to);
+    let rays = if mover == BISHOP {
+        bishop_attacks(to, occ_post)
+    } else if mover == ROOK {
+        rook_attacks(to, occ_post)
+    } else {
+        bishop_attacks(to, occ_post) | rook_attacks(to, occ_post)
+    };
+    if rays & kr != 0 {
+        return false;
+    }
+    // Created-pin x-ray: with foe transparent, a ray reaching the king
+    // crosses a foe piece this landing would pin (a direct attack would
+    // already have failed the test above).
+    let thru = if mover == BISHOP {
+        bishop_attacks(to, occ_post & !foe)
+    } else if mover == ROOK {
+        rook_attacks(to, occ_post & !foe)
+    } else {
+        bishop_attacks(to, occ_post & !foe) | rook_attacks(to, occ_post & !foe)
+    };
+    (thru >> ksq) & 1 == 0
+}
 //
 /// True if `mv` — a legal move for `b`, with `ctx` built from the same `b`
 /// before the move — leaves the enemy reply set counted in
@@ -1486,6 +1541,15 @@ pub fn multiply_is_quiet(ctx: &MultiplyCtx, b: &Board, mv: Move) -> bool {
         return false;
     }
     if ctx.to_piece[mover] & to_bit != 0 {
+        // Precision recheck (R3-A): slider landings flagged only via the
+        // empty-board ring projection (`to_empty` is clean, so their targets,
+        // pin-ray interiors, foe squares, and the b-file square are clear)
+        // get a real-occupancy second test that reclaims false interferers.
+        if (mover == BISHOP || mover == ROOK || mover == QUEEN)
+            && multiply_recheck_quiet(ctx, b, from, to, mover)
+        {
+            return true;
+        }
         return false;
     }
     true
