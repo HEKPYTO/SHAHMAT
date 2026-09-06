@@ -17,9 +17,8 @@ on:
 permissions:
   contents: read
 
-env:
+  IMAGE_RELEASE: ghcr.io/hekpyto/shahmat
   IMAGE_LOCAL: shahmat-svc:ci
-  IMAGE_RELEASE: ghcr.io/HEKPYTO/SHAHMAT
   PERFT_D6: "119060324"
 
 jobs:
