@@ -870,7 +870,15 @@ pub fn queen_attacks(sq: u8, occ: u64) -> u64 {
     {
         hq::queen_attacks(sq, occ)
     }
-    #[cfg(not(any(target_arch = "aarch64", feature = "min-mem")))]
+    #[cfg(all(target_arch = "x86_64", feature = "pext", not(feature = "min-mem")))]
+    {
+        match cached_engine() {
+            Engine::Pext => pext::rook_attacks(sq, occ) | pext::bishop_attacks(sq, occ),
+            Engine::Black => black::rook_attacks(sq, occ) | black::bishop_attacks(sq, occ),
+            Engine::Avx2Hq | Engine::Hq => hq::rook_attacks(sq, occ) | hq::bishop_attacks(sq, occ),
+        }
+    }
+    #[cfg(not(any(target_arch = "aarch64", feature = "min-mem", feature = "pext")))]
     {
         rook_attacks(sq, occ) | bishop_attacks(sq, occ)
     }

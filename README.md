@@ -1,6 +1,6 @@
 # SHAHMAT
 
-Movegen-correct chess lib — fastest, least memory on each platform. Apache-2.0.
+Movegen-correct chess lib — fast with less memory on each platform. Apache-2.0.
 
 ## Init
 

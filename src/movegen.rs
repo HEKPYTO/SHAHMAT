@@ -112,6 +112,18 @@ const EP_MASK: u64 = 0x7f << EP_SHIFT; // 7 bits @5-11: 0-63 sq, 64 none
 const HM_SHIFT: u64 = 12;
 const HM_MASK: u64 = 0x3fff << HM_SHIFT; // 14 bits @12-25
 const NO_CAP: u64 = 8;
+// Keep-mask per square: rook homes clear one right, king homes both
+// (a king move always leaves e1/e8); make ANDs the from/to entries.
+const CASTLE_KEEP: [u64; 64] = {
+    let mut t = [!0u64; 64];
+    t[0] = !(WQ);
+    t[7] = !(WK);
+    t[56] = !(BQ);
+    t[63] = !(BK);
+    t[4] = !(WK | WQ);
+    t[60] = !(BK | BQ);
+    t
+};
 //
 // Stable unlikely polyfill (docs-blessed `cold_path` recipe, 1.95.0+;
 // `likely_unlikely` intrinsics still nightly-only). Pure hint attribute —
@@ -705,6 +717,87 @@ pub fn count_legal(b: &mut Board) -> u32 {
     counter.get()
 }
 //
+/// Depth-2 fringe sink: each emission goes straight to the multiply quiet-share /
+/// exact-count split - no parent MoveList. Same tokens, same totals; `b` pristine.
+struct BulkSink {
+    o: Board,
+    w: Board,
+    c: MultiplyCtx,
+    q: u64,
+    n: u64,
+}
+impl BulkSink {
+    #[inline(always)]
+    fn one(&mut self, m: Move) {
+        if multiply_is_quiet(&self.c, &self.o, m) {
+            self.q += 1;
+        } else {
+            self.w = self.o;
+            make(&mut self.w, m);
+            self.n += count_legal(&mut self.w) as u64;
+        }
+    }
+}
+impl MoveSink for BulkSink {
+    #[inline(always)]
+    fn push_targets(&mut self, f: u8, mut t: u64, m: u8) {
+        while t != 0 {
+            let q = t.trailing_zeros() as u8;
+            t &= t - 1;
+            self.one(Move::new(f, q, m, 0));
+        }
+    }
+    #[inline(always)]
+    fn push_pawn_moves(&mut self, mut t: u64, o: i32) {
+        while t != 0 {
+            let q = t.trailing_zeros() as u8;
+            t &= t - 1;
+            self.one(Move::new((q as i32 - o) as u8, q, PAWN as u8, 0));
+        }
+    }
+    #[inline(always)]
+    fn push_pawn_doubles(&mut self, mut t: u64, o: i32) {
+        while t != 0 {
+            let q = t.trailing_zeros() as u8;
+            t &= t - 1;
+            self.one(Move::new((q as i32 - o) as u8, q, PAWN as u8, 0));
+        }
+    }
+    #[inline(always)]
+    fn push_pawn_promos(&mut self, mut t: u64, o: i32) {
+        while t != 0 {
+            let q = t.trailing_zeros() as u8;
+            t &= t - 1;
+            let f = (q as i32 - o) as u8;
+            for p in 1..=4u8 {
+                self.one(Move::new(f, q, PAWN as u8, p));
+            }
+        }
+    }
+    #[inline(always)]
+    fn push_one(&mut self, m: Move) {
+        self.one(m);
+    }
+}
+/// Depth-2 bulk total without materialising the parent list (see [`BulkSink`]).
+pub fn count_bulk2(b: &mut Board) -> u64 {
+    let c = multiply_ctx(b);
+    let o = *b;
+    let mut s = BulkSink {
+        o,
+        w: o,
+        c,
+        q: 0,
+        n: 0,
+    };
+    if stm_white(b) {
+        generate_moves_into::<_, true>(b, &mut s);
+    } else {
+        generate_moves_into::<_, false>(b, &mut s);
+    }
+    s.n + s.q * s.c.opp as u64
+}
+//
 /// True if side `white` has at least one legal move (for E8/E9).
 ///
 /// Early exit via a found-flag sink: the core stops between emission groups
@@ -1004,7 +1097,7 @@ fn emit_slider_moves<S: MoveSink, const WHITE: bool>(
     while queens != 0 {
         let from = queens.trailing_zeros() as u8;
         queens &= queens - 1;
-        let mut targets = (bishop_attacks(from, occ) | rook_attacks(from, occ)) & !own & check_mask;
+        let mut targets = crate::attacks::queen_attacks(from, occ) & !own & check_mask;
         if (pinned_hv | pinned_diag) >> from & 1 != 0 {
             targets &= line_through(ksq, from);
         }
@@ -1292,11 +1385,15 @@ pub fn multiply_ctx(b: &mut Board) -> MultiplyCtx {
     //
     let mut from = their_push | their_pawn_atk | their_slide;
     let mut to_empty = from | foe;
-    // Enemy back-rank b-file: vacating it unblocks O-O-O path emptiness with
-    // no attack-map trace (bishop/king vacates miss every ring projection).
-    let b_sq = if white { 57u8 } else { 1u8 };
-    from |= 1u64 << b_sq;
-    to_empty |= 1u64 << b_sq;
+    // Rights-gated: quiet never restores foe rights, so O-O-O emptiness
+    // only matters while foe keeps Q rights.
+    let has_k = b.state[0] & if white { BK } else { WK } != 0;
+    let has_q = b.state[0] & if white { BQ } else { WQ } != 0;
+    if has_q {
+        let b_sq = if white { 57u8 } else { 1u8 };
+        from |= 1u64 << b_sq;
+        to_empty |= 1u64 << b_sq;
+    }
     //
     // King-relevant set: ring + king square, extended with castle-transit
     // squares (attack-only changes on c8/c1 cost castling outside the ring).
@@ -1313,7 +1410,10 @@ pub fn multiply_ctx(b: &mut Board) -> MultiplyCtx {
     if their_king != 0 {
         let ksq = their_king.trailing_zeros() as u8;
         let mut kr = (KING_TAB[ksq as usize] & !foe) | (1u64 << ksq);
-        kr |= if white { 0x6C00_0000_0000_0000 } else { 0x6C };
+        // Transit per side right: fewer s1 probes, smaller rings.
+        let tk = if white { 0x6000_0000_0000_0000 } else { 0x60 };
+        let tq = if white { 0x0C00_0000_0000_0000 } else { 0x0C };
+        kr |= (if has_k { tk } else { 0 }) | (if has_q { tq } else { 0 });
         let us_pawn = if white { 0 } else { 1 };
         while kr != 0 {
             let s1 = kr.trailing_zeros() as u8;
@@ -1862,40 +1962,79 @@ pub fn make(b: &mut Board, mv: Move) -> StateInfo {
         captured = PAWN as u64;
     }
 
-    let mut undo = StateInfo { data: [0; 8] };
-    undo.data[0] = b.state[0];
-    undo.data[1] = b.state[1];
-    undo.data[2] = captured;
-    undo.data[3] = cap_sq as u64;
-    undo.data[4] = piece as u64;
+    let undo = StateInfo {
+        data: [
+            b.state[0],
+            b.state[1],
+            captured,
+            cap_sq as u64,
+            piece as u64,
+            0,
+            0,
+            0,
+        ],
+    };
 
-    // Lift the mover.
-    b.occupancies[piece] &= !from_bit;
-    b.occupancies[own_i] &= !from_bit;
-    b.occupancies[OCC] &= !from_bit;
-
-    // Remove the victim.
-    if captured != NO_CAP {
+    // Occupancy deltas: XOR relocates a bit from->to in one RMW wherever
+    // the leg net is a pure relocation (all quiet legs, colour aggregate
+    // always); AND/OR stays only where a victim shares the square. Quiet
+    // drops 6 RMWs to 3, normal capture 9 to 5, castle rook 6 to 3.
+    let delta = from_bit | to_bit;
+    if promo == 0 && captured == NO_CAP {
+        // Quiet ordinary move (castling king step included): from is set and
+        // to is clear in all three boards, so one XOR delta each relocates.
+        b.occupancies[piece] ^= delta;
+        b.occupancies[own_i] ^= delta;
+        b.occupancies[OCC] ^= delta;
+    } else if promo == 0 && cap_sq == to {
+        // Normal capture: mover XOR-relocates; victim clears; OCC net is
+        // just clearing from since to stays occupied. Same-type capture
+        // (victim bit doubles as the landing bit) folds to a from-only XOR
+        // with the victim clear masked to a no-op, no extra branch.
+        let same = ((captured as usize) == piece) as u64;
+        b.occupancies[piece] ^= delta ^ (same * to_bit);
+        b.occupancies[captured as usize] &= !((1 - same) * to_bit);
+        b.occupancies[own_i] ^= delta;
+        b.occupancies[foe_i] &= !to_bit;
+        b.occupancies[OCC] &= !from_bit;
+    } else if promo == 0 {
+        // En passant (only non-promo leg with cap_sq != to): pawn takes to
+        // an empty square while the victim leaves cap_sq; one 3-bit XOR for
+        // the pawn and occupied boards, single-bit clears for the foe side.
         let cap_bit = 1u64 << cap_sq;
-        b.occupancies[captured as usize] &= !cap_bit;
+        let ep_delta = from_bit | cap_bit | to_bit;
+        b.occupancies[piece] ^= ep_delta;
+        b.occupancies[own_i] ^= delta;
         b.occupancies[foe_i] &= !cap_bit;
-        b.occupancies[OCC] &= !cap_bit;
-    }
-
-    // Land: promotion swaps the pawn for the new piece.
-    if promo != 0 {
+        b.occupancies[OCC] ^= ep_delta;
+    } else {
+        // Promotion legs (rare): pawn leaves, placed piece lands; colour
+        // aggregate still XOR-relocates; OCC narrows to its net change.
         let placed = match promo {
             1 => KNIGHT,
             2 => BISHOP,
             3 => ROOK,
             _ => QUEEN,
         };
+        b.occupancies[piece] &= !from_bit;
+        if captured != NO_CAP {
+            // Victim clears from its own square before the placed piece
+            // lands, so a same-type victim cannot erase the landing bit.
+            let cap_bit = 1u64 << cap_sq;
+            b.occupancies[captured as usize] &= !cap_bit;
+            b.occupancies[foe_i] &= !cap_bit;
+        }
         b.occupancies[placed] |= to_bit;
-    } else {
-        b.occupancies[piece] |= to_bit;
+        b.occupancies[own_i] ^= delta;
+        if captured == NO_CAP {
+            b.occupancies[OCC] ^= delta;
+        } else if cap_sq == to {
+            b.occupancies[OCC] &= !from_bit;
+        } else {
+            let cap_bit = 1u64 << cap_sq;
+            b.occupancies[OCC] ^= from_bit | cap_bit | to_bit;
+        }
     }
-    b.occupancies[own_i] |= to_bit;
-    b.occupancies[OCC] |= to_bit;
 
     // Castle: the rook hops with the king.
     if piece == KING {
@@ -1907,32 +2046,14 @@ pub fn make(b: &mut Board, mv: Move) -> StateInfo {
         }
     }
 
-    // Rights: king move clears both; rook-home from/to clears one.
+    // Branchless rights/EP: from/to keep-masks fold king/rook-home
+    // clears; db is 1 exactly on a pawn double push (xor 16 iff the
+    // squares differ by 16 for 0..64, and promos never span 16).
     let mut s0 = b.state[0];
-    if piece == KING {
-        s0 &= if white { !(WK | WQ) } else { !(BK | BQ) };
-    }
-    if from == 7 || to == 7 {
-        s0 &= !WK;
-    }
-    if from == 0 || to == 0 {
-        s0 &= !WQ;
-    }
-    if from == 63 || to == 63 {
-        s0 &= !BK;
-    }
-    if from == 56 || to == 56 {
-        s0 &= !BQ;
-    }
-
-    // EP square: only a double push sets one (the skipped square).
-    let double = piece == PAWN && ((to as i8 - from as i8).abs() == 16);
-    s0 &= !EP_MASK;
-    s0 |= if double {
-        (((from + to) / 2) as u64) << EP_SHIFT
-    } else {
-        (EP_NONE as u64) << EP_SHIFT
-    };
+    s0 &= CASTLE_KEEP[from as usize] & CASTLE_KEEP[to as usize];
+    let db = ((piece == PAWN) as u64) * (((from ^ to) == 16) as u64);
+    let ep_sq = db * (((from + to) / 2) as u64) + (1 - db) * (EP_NONE as u64);
+    s0 = (s0 & !EP_MASK) | (ep_sq << EP_SHIFT);
 
     // Halfmove: reset on pawn move or capture.
     let hm = (s0 & HM_MASK) >> HM_SHIFT;
@@ -1951,12 +2072,13 @@ pub fn make(b: &mut Board, mv: Move) -> StateInfo {
 
 #[inline]
 fn move_rook(b: &mut Board, own_i: usize, from: u8, to: u8) {
-    b.occupancies[ROOK] &= !(1u64 << from);
-    b.occupancies[ROOK] |= 1u64 << to;
-    b.occupancies[own_i] &= !(1u64 << from);
-    b.occupancies[own_i] |= 1u64 << to;
-    b.occupancies[OCC] &= !(1u64 << from);
-    b.occupancies[OCC] |= 1u64 << to;
+    // Castle rook relocation: from is set and to is clear in all three
+    // boards in both make and unmake directions, so one XOR delta each;
+    // self-inverse, shared by both paths.
+    let d = (1u64 << from) | (1u64 << to);
+    b.occupancies[ROOK] ^= d;
+    b.occupancies[own_i] ^= d;
+    b.occupancies[OCC] ^= d;
 }
 
 /// Undo `make(b, mv)`, restoring the board bit-exact (state words verbatim,
@@ -1975,8 +2097,30 @@ pub fn unmake(b: &mut Board, undo: StateInfo, mv: Move) {
     let captured = undo.data[2];
     let cap_sq = undo.data[3] as u8;
 
-    // Lift the landed piece (promo piece or mover).
-    if promo != 0 {
+    // Exact XOR inverses of the make legs (XOR is self-inverse; the victim
+    // restore precedes the mover XOR so a same-type victim bit is back
+    // before the shared board toggles).
+    let delta = from_bit | to_bit;
+    let foe_i = if white { BLACK } else { WHITE };
+    if promo == 0 && captured == NO_CAP {
+        b.occupancies[piece] ^= delta;
+        b.occupancies[own_i] ^= delta;
+        b.occupancies[OCC] ^= delta;
+    } else if promo == 0 && cap_sq == to {
+        let same = ((captured as usize) == piece) as u64;
+        b.occupancies[captured as usize] |= (1 - same) * to_bit;
+        b.occupancies[piece] ^= delta ^ (same * to_bit);
+        b.occupancies[own_i] ^= delta;
+        b.occupancies[foe_i] |= to_bit;
+        b.occupancies[OCC] |= from_bit;
+    } else if promo == 0 {
+        // En passant inverse.
+        let cap_bit = 1u64 << cap_sq;
+        b.occupancies[OCC] ^= from_bit | cap_bit | to_bit;
+        b.occupancies[foe_i] |= cap_bit;
+        b.occupancies[own_i] ^= delta;
+        b.occupancies[piece] ^= from_bit | cap_bit | to_bit;
+    } else {
         let placed = match promo {
             1 => KNIGHT,
             2 => BISHOP,
@@ -1984,11 +2128,22 @@ pub fn unmake(b: &mut Board, undo: StateInfo, mv: Move) {
             _ => QUEEN,
         };
         b.occupancies[placed] &= !to_bit;
-    } else {
-        b.occupancies[piece] &= !to_bit;
+        if captured != NO_CAP {
+            let cap_bit = 1u64 << cap_sq;
+            b.occupancies[captured as usize] |= cap_bit;
+            b.occupancies[foe_i] |= cap_bit;
+        }
+        b.occupancies[piece] |= from_bit;
+        b.occupancies[own_i] ^= delta;
+        if captured == NO_CAP {
+            b.occupancies[OCC] ^= delta;
+        } else if cap_sq == to {
+            b.occupancies[OCC] |= from_bit;
+        } else {
+            let cap_bit = 1u64 << cap_sq;
+            b.occupancies[OCC] ^= from_bit | cap_bit | to_bit;
+        }
     }
-    b.occupancies[own_i] &= !to_bit;
-    b.occupancies[OCC] &= !to_bit;
 
     // Castle: rook hops back.
     if piece == KING {
@@ -1998,20 +2153,6 @@ pub fn unmake(b: &mut Board, undo: StateInfo, mv: Move) {
         } else if df == -2 {
             move_rook(b, own_i, from - 1, from - 4);
         }
-    }
-
-    // Mover home (pawn on promotions).
-    b.occupancies[piece] |= from_bit;
-    b.occupancies[own_i] |= from_bit;
-    b.occupancies[OCC] |= from_bit;
-
-    // Victim back.
-    if captured != NO_CAP {
-        let cap_bit = 1u64 << cap_sq;
-        let foe_i = if white { BLACK } else { WHITE };
-        b.occupancies[captured as usize] |= cap_bit;
-        b.occupancies[foe_i] |= cap_bit;
-        b.occupancies[OCC] |= cap_bit;
     }
 
     b.state[0] = undo.data[0];

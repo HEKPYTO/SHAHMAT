@@ -42,13 +42,14 @@ Rules (or the numbers mean nothing):
 ## Report schema (`outputs/bench-<ts>.json`)
 
 ```json
-{"image": "shahmat-svc:bench", "date": "20260906-220531",
+{"image": "shahmat-svc:bench", "date": "<utc-ts>",
  "runs": [{"pos": "startpos", "depth": 6, "nodes": 119060324,
-           "secs": 0.107, "nps": 1116838398}]}
+           "secs": "<measured>", "nps": "<measured>"}]}
 ```
 
-`nodes`/`secs`/`nps` are parsed from the svc's own `nodes:`/`time:`/`nps:`
-lines with awk — no schema to drift.
+`nodes` is the exact perft count. `secs`/`nps` are measured on the
+run host and vary by machine — values omitted here. They are parsed
+from the svc's own `nodes:`/`time:`/`nps:` lines with awk — no schema to drift.
 
 ## Gating properly
 
@@ -62,7 +63,7 @@ echo $?                                # 0 = all exact
 Slow KEEP-grade counts (run once per kept change, not per probe):
 startpos d7 = 3195901860, Kiwipete d6 = 8031647685.
 
-## Fastest binary (PGO, local-only)
+## Fast build (PGO, local-only)
 
 Profiles are never committed (arch rot) — retrain per machine.
 Docker trains per arch on every build; for host timing:

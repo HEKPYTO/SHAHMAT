@@ -134,6 +134,23 @@ jobs:
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+      # Per-arch tags: point at each arch digest inside the pushed index.
+      # No rebuild — imagetools only. The `latest` index stays the pull path.
+      - name: create per-arch tags (amd64/arm64)
+        run: |
+          set -euo pipefail
+          TAG="${IMAGE_RELEASE}:latest"
+          RAW="$(docker buildx imagetools inspect "$TAG" --raw)"
+          AMD="$(echo "$RAW" | jq -r '.manifests[] | select(.platform.architecture=="amd64") | .digest')"
+          ARM="$(echo "$RAW" | jq -r '.manifests[] | select(.platform.architecture=="arm64") | .digest')"
+          [ -n "$AMD" ] && [ -n "$ARM" ] || { echo "::error::missing arch digest in index" >&2; exit 1; }
+          docker buildx imagetools create -t "${IMAGE_RELEASE}:amd64-latest" "${IMAGE_RELEASE}@${AMD}"
+          docker buildx imagetools create -t "${IMAGE_RELEASE}:arm64-latest" "${IMAGE_RELEASE}@${ARM}"
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            VER="${GITHUB_REF#refs/tags/}"
+            docker buildx imagetools create -t "${IMAGE_RELEASE}:amd64-${VER}" "${IMAGE_RELEASE}@${AMD}"
+            docker buildx imagetools create -t "${IMAGE_RELEASE}:arm64-${VER}" "${IMAGE_RELEASE}@${ARM}"
+          fi
 
       - name: record per-arch size (warn >12MB, fail >50MB)
         run: |

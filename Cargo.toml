@@ -2,7 +2,7 @@
 name = "shahmat"
 version = "0.1.0"
 edition = "2021"
-description = "Movegen-correct chess lib, fastest plus least-memory per platform"
+description = "Movegen-correct chess lib, fast with less memory per platform"
 license = "Apache-2.0"
 
 [[bin]]

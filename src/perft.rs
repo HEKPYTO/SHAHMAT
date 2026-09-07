@@ -29,9 +29,7 @@
 //! `--tt <MB>` flag in `shahmat-svc perft` wires [`Tt`] to [`perft_tt`].
 
 use crate::board::{board_hash, Board, Move};
-use crate::movegen::{
-    count_legal, generate_legal, make, multiply_ctx, multiply_is_quiet, unmake, MoveList,
-};
+use crate::movegen::{count_bulk2, count_legal, generate_legal, make, unmake, MoveList};
 
 /// Maximum supported depth (stack guard: each level holds a movelist plus
 /// an undo token; tables end far earlier). Public entries assert it;
@@ -301,30 +299,13 @@ fn bulk_mut(b: &mut Board, depth: u32) -> u64 {
         // decided set-wise with no MoveList traffic and no legality filter.
         return count_legal(b) as u64;
     }
+    if depth == 2 {
+        // Fringe-sink horizon (movegen `count_bulk2`): per-emit quiet-share /
+        // exact-count, no parent MoveList. Totals identical to the list path.
+        return count_bulk2(b);
+    }
     let mut list = MoveList::new();
     generate_legal(b, &mut list);
-    if depth == 2 {
-        // Bulk horizon 2 with MoveSetMultiply: quiet moves (no capture,
-        // check, pin/block change, EP, promo, castle, or live double-push)
-        // leave the enemy reply set unchanged, so each adds the pre-counted
-        // null-move total instead of one make → count → unmake. Interfering
-        // moves take the exact path. Totals identical (see the movegen
-        // differential oracle `multiply_matches_plain_everywhere`).
-        let ctx = multiply_ctx(b);
-        let mut nodes = 0u64;
-        let mut quiet = 0u64;
-        for i in 0..list.len {
-            let mv = list.moves[i];
-            if multiply_is_quiet(&ctx, b, mv) {
-                quiet += 1;
-            } else {
-                let undo = make(b, mv);
-                nodes += count_legal(b) as u64;
-                unmake(b, undo, mv);
-            }
-        }
-        return nodes + quiet * ctx.opp as u64;
-    }
     let mut nodes = 0u64;
     for i in 0..list.len {
         let mv = list.moves[i];
