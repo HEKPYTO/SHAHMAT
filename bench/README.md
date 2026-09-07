@@ -7,6 +7,7 @@ No python, no jq, no frameworks.
 | --- | --- | --- |
 | `bench.sh [image]` | Builds the image, times startpos d6 / kiwi d5 / pos4 d5 in-image (warmup + median of 5, nodes-gated), writes `outputs/bench-<utc-ts>.json` + table on stdout | Measuring speed |
 | `gate.sh [binary]` | Checks 15 exact perft counts + 2 `--no-bulk` cross-checks + divide-row self-consistency against any `shahmat-svc` binary (default `./target/release/shahmat-svc`), exit 0/1 | Proving correctness |
+| `searchbench.sh [--gate] [binary]` | Search-representative matrix (8 entries, mid/endgame heavy) across bulk / tt16 / nobulk modes, every cell node gated, default times warmup plus median of 5 into `outputs/searchbench-<utc-ts>.json` | Timing search-like mix |
 
 ## Porting to another project
 
@@ -21,6 +22,7 @@ The median/gate/JSON logic ports untouched.
 ```sh
 ./bench/bench.sh                    # default image shahmat-svc:bench
 IMAGE=my-reg/shahmat:test ./bench/bench.sh   # override, or pass as $1
+./bench/searchbench.sh [--gate]     # gate exactness only, default also times and writes JSON
 ```
 
 Rules (or the numbers mean nothing):

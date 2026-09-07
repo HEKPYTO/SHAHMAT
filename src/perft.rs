@@ -30,6 +30,7 @@
 
 use crate::board::{board_hash, Board, Move};
 use crate::movegen::{count_bulk2, count_legal, generate_legal, make, unmake, MoveList};
+use crate::movegen::{make_quiet, unmake_quiet, OCC};
 
 /// Maximum supported depth (stack guard: each level holds a movelist plus
 /// an undo token; tables end far earlier). Public entries assert it;
@@ -259,9 +260,28 @@ fn full_mut(b: &mut Board, depth: u32) -> u64 {
     }
     let mut list = MoveList::new();
     generate_legal(b, &mut list);
+    if depth == 1 {
+        // Fringe edge-cut: each legal move is exactly 1 node, so the count
+        // is the list length — no make/unmake or recursion below the fringe.
+        return list.len as u64;
+    }
     let mut nodes = 0u64;
     for i in 0..list.len {
         let mv = list.moves[i];
+        // Quiet non-pawn lane (mover ids: PAWN 0, KING 5; file delta 2 is the
+        // castling king step): promo and capture tests predict not-taken, the
+        // class tests ride piece runs in the movelist. Captures and specials
+        // keep the full make/unmake path; undo is bit-exact either way.
+        let m = mv.mover();
+        // File-XOR is not file distance (e.g. files 4^2=6): use the true
+        // difference, as make does, so both castling directions stay exact.
+        let castle = m == 5 && ((mv.to() & 7) as i8 - (mv.from() & 7) as i8).abs() == 2;
+        if mv.promo() == 0 && b.occupancies[OCC] & (1u64 << mv.to()) == 0 && m != 0 && !castle {
+            let s0 = make_quiet(b, mv);
+            nodes += full_mut(b, depth - 1);
+            unmake_quiet(b, s0, mv);
+            continue;
+        }
         let undo = make(b, mv);
         nodes += full_mut(b, depth - 1);
         unmake(b, undo, mv);

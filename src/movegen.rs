@@ -99,7 +99,7 @@ const QUEEN: usize = 4;
 const KING: usize = 5;
 const WHITE: usize = 6;
 const BLACK: usize = 7;
-const OCC: usize = 8;
+pub(crate) const OCC: usize = 8;
 
 // `state[0]` packing (Main ruling: ep 7 bits @5-11, halfmove 14 bits @12-25).
 const STM: u64 = 1;
@@ -2157,6 +2157,37 @@ pub fn unmake(b: &mut Board, undo: StateInfo, mv: Move) {
 
     b.state[0] = undo.data[0];
     b.state[1] = undo.data[1];
+}
+
+/// Quiet non-pawn fast path for the full-make loop: caller guarantees promo 0,
+/// `to` empty of all pieces (legal moves never land on own pieces, so no
+/// capture), mover not a pawn (no EP/push state), and no castling king step.
+/// Same board deltas as make's quiet leg; rights fold through the shared keep
+/// masks, EP is none, halfmove always +1. Undo is the prior state word.
+#[inline]
+pub fn make_quiet(b: &mut Board, mv: Move) -> u64 {
+    let s0 = b.state[0];
+    let d = (1u64 << mv.from()) | (1u64 << mv.to());
+    b.occupancies[mv.mover() as usize] ^= d;
+    b.occupancies[if stm_white(b) { WHITE } else { BLACK }] ^= d;
+    b.occupancies[OCC] ^= d;
+    b.state[0] = ((s0
+        & CASTLE_KEEP[mv.from() as usize]
+        & CASTLE_KEEP[mv.to() as usize]
+        & !(EP_MASK | HM_MASK))
+        | ((EP_NONE as u64) << EP_SHIFT)
+        | ((((s0 & HM_MASK) >> HM_SHIFT) + 1) << HM_SHIFT))
+        ^ STM;
+    s0
+}
+/// Exact inverse of make_quiet: the 3 XORs self-invert, state word verbatim.
+#[inline]
+pub fn unmake_quiet(b: &mut Board, s0: u64, mv: Move) {
+    let d = (1u64 << mv.from()) | (1u64 << mv.to());
+    b.occupancies[mv.mover() as usize] ^= d;
+    b.occupancies[if !stm_white(b) { WHITE } else { BLACK }] ^= d;
+    b.occupancies[OCC] ^= d;
+    b.state[0] = s0;
 }
 
 // ---------------------------------------------------------------------------
