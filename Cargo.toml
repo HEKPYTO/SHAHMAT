@@ -4,6 +4,7 @@ version = "0.1.0"
 edition = "2021"
 description = "Movegen-correct chess lib, fast with less memory per platform"
 license = "Apache-2.0"
+repository = "https://github.com/HEKPYTO/SHAHMAT"
 
 [[bin]]
 name = "shahmat-svc"
