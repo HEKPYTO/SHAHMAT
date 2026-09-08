@@ -23,6 +23,13 @@
 //! is the lib-scoped search substrate (mate solver + exact cache + staged
 //! substrate for ordering).
 //!
+//! K7 staged generation at interior nodes: one [`generate_legal`] fill is
+//! searched as TT-best-first plus captures/promotions (stage A, ordered
+//! eagerly), then quiets (stage B, MVV-LVA-ordered lazily only while
+//! `alpha < beta`). A stage-A cutoff skips stage-B ordering entirely. The
+//! horizon is untouched: depth-0 nodes route to quiescence, and quiescence
+//! itself is never staged. [`Stats`] records the stage-A cutoff fraction.
+//!
 //! The quiescence horizon never touches the table (no probe, no store):
 //! TT plumb-through stays in `negamax`/root only, so cached bounds keep
 //! their exact-depth meaning.
@@ -95,15 +102,22 @@ pub fn move_score(b: &Board, mv: Move) -> i32 {
 /// In-place descending sort by MVV-LVA key (insertion sort; lists are tiny).
 /// Public as the ordering primitive behind staged generation work.
 pub fn order_moves(b: &Board, list: &mut MoveList) {
-    for i in 1..list.len {
-        let mv = list.moves[i];
+    let len = list.len;
+    order_range(b, &mut list.moves[..len]);
+}
+
+/// Same insertion sort over a caller-chosen slice (one search stage).
+/// No allocation; used to order stage B lazily only when it is reached.
+fn order_range(b: &Board, moves: &mut [Move]) {
+    for i in 1..moves.len() {
+        let mv = moves[i];
         let key = move_score(b, mv);
         let mut j = i;
-        while j > 0 && move_score(b, list.moves[j - 1]) < key {
-            list.moves[j] = list.moves[j - 1];
+        while j > 0 && move_score(b, moves[j - 1]) < key {
+            moves[j] = moves[j - 1];
             j -= 1;
         }
-        list.moves[j] = mv;
+        moves[j] = mv;
     }
 }
 
@@ -335,11 +349,29 @@ fn unadjust(score: i32, ply: i32) -> i32 {
 // Search proper.
 // ---------------------------------------------------------------------------
 
-/// Per-search node counter (negamax entries).
+/// Per-search counters (negamax entries plus staged-generation cutoffs).
 #[derive(Clone, Copy, Default)]
 pub struct Stats {
     /// Negamax node entries.
     pub nodes: u64,
+    /// Beta cutoffs while stage A (TT-first move plus captures/promotions,
+    /// en passant included) was open.
+    pub cuts_a: u64,
+    /// Beta cutoffs while stage B (lazily ordered quiets) was open.
+    pub cuts_b: u64,
+}
+
+impl Stats {
+    /// Share of beta cutoffs decided inside stage A, i.e. how often the
+    /// lazy stage-B ordering paid off. `None` when no cutoff fired.
+    pub fn stage_a_cut_fraction(&self) -> Option<f64> {
+        let total = self.cuts_a + self.cuts_b;
+        if total == 0 {
+            None
+        } else {
+            Some(self.cuts_a as f64 / total as f64)
+        }
+    }
 }
 
 /// One iterative-deepening row: the completed depth plus its best move,
@@ -373,6 +405,42 @@ fn is_tactical(b: &Board, mv: Move) -> bool {
         return true;
     }
     mv.mover() == 0 && (mv.from() & 7) != (mv.to() & 7)
+}
+
+/// Pin the TT-best move (when legal here) to the front, then stable-
+/// partition the rest so captures/promotions (en passant included) lead
+/// and quiets (castles, pushes, quiet piece/king moves) trail. Returns
+/// (`skip`, `na`): the pinned TT slot occupies `moves[..skip]` (kept out
+/// of every sort so TT-best-first survives), stage A is `moves[skip..na]`
+/// (TT slot plus tacticals), stage B is `moves[na..]` (quiets). One
+/// [`Move`] of stack scratch, no heap, so the zero-alloc harness stays
+/// green. Exactness note: every tactical key is positive and every quiet
+/// key is zero, so per-stage MVV-LVA sorts reproduce the single-list
+/// order (TT slot aside).
+fn stage_moves(b: &Board, list: &mut MoveList, tt_best: Option<Move>) -> (usize, usize) {
+    let mut skip = 0;
+    if let Some(tt) = tt_best {
+        if let Some(p) = list.as_slice().iter().position(|&m| m == tt) {
+            list.moves.swap(0, p);
+            skip = 1;
+        }
+    }
+    let mut na = skip;
+    let mut i = skip;
+    while i < list.len {
+        if is_tactical(b, list.moves[i]) {
+            let mv = list.moves[i];
+            let mut j = i;
+            while j > na {
+                list.moves[j] = list.moves[j - 1];
+                j -= 1;
+            }
+            list.moves[na] = mv;
+            na += 1;
+        }
+        i += 1;
+    }
+    (skip, na)
 }
 
 /// Quiescence search over the depth-0 horizon: calms captures, promotions,
@@ -496,12 +564,23 @@ fn negamax(
         alpha = hit.alpha;
         tt_best = hit.best;
     }
-    order_moves(b, &mut list);
-    order_tt_best(&mut list, tt_best);
+    // K7 staged generation (interior nodes only): one `generate_legal`
+    // fill, searched as TT-first plus captures/promos (stage A, ordered
+    // eagerly), then quiets (stage B, ordered lazily only while alpha is
+    // still below beta — a stage-A cutoff skips that work entirely).
+    // Depth-0 nodes return through `quiescence` above, so the horizon
+    // keeps its own shape and stage B is trivially skipped there.
+    let (skip, na) = stage_moves(b, &mut list, tt_best);
+    let len = list.len;
+    order_range(b, &mut list.moves[skip..na]);
     let mut best = -INF;
     let mut best_mv = None;
     let mut raised = false;
-    for i in 0..list.len {
+    let mut i = 0;
+    while i < len {
+        if i == na {
+            order_range(b, &mut list.moves[na..len]);
+        }
         let mv = list.moves[i];
         let undo = make(b, mv);
         let s = -negamax(
@@ -523,8 +602,14 @@ fn negamax(
             raised = true;
         }
         if alpha >= beta {
+            if i < na {
+                stats.cuts_a += 1;
+            } else {
+                stats.cuts_b += 1;
+            }
             break;
         }
+        i += 1;
     }
     if let Some(t) = tt {
         let fail_high = alpha >= beta;
@@ -708,6 +793,137 @@ mod tests {
         assert!(rows[0].nodes > 0 && rows[1].nodes >= rows[0].nodes);
         assert!(rows.iter().all(|r| r.best.is_some()));
         assert!(tt.probes() > 0, "table must see probes");
+    }
+
+    /// Predicate edges: EP (pawn diagonal to empty) and every promotion
+    /// are tactical; castles, pushes, and quiet piece moves are not.
+    #[test]
+    fn tactical_predicate_edges() {
+        // E1 (black to move, EP square d3): c4xd3 e.p. is tactical, the
+        // c4-c3 push on the same board is quiet.
+        let ep = pos("8/6bb/8/8/R1pP2k1/4P3/P7/K7 b - d3 0 1");
+        assert!(is_tactical(&ep, Move::new(26, 19, 0, 0)));
+        assert!(!is_tactical(&ep, Move::new(26, 18, 0, 0)));
+        let sp = pos(fen::STARTPOS);
+        // e1g1 castles as a quiet king step (back rank cleared so the
+        // landing square is genuinely empty, as in a legal castle).
+        let cr = pos("r3k2r/pppppppp/8/8/8/8/PPPPPPPP/R3K2R w KQkq - 0 1");
+        assert!(!is_tactical(&cr, Move::new(4, 6, 5, 0)));
+        // e2e4 double push and g1f3 are quiet as well.
+        assert!(!is_tactical(&sp, Move::new(12, 28, 0, 0)));
+        assert!(!is_tactical(&sp, Move::new(6, 21, 1, 0)));
+        // Quiet push-promo (a7-a8) and capture-promo (a7xb8) agree.
+        let pq = pos("1r5k/P7/8/8/8/8/6K1/8 w - - 0 1");
+        assert!(is_tactical(&pq, Move::new(48, 56, 0, 4)));
+        assert!(is_tactical(&pq, Move::new(48, 57, 0, 4)));
+        // A real capture out of Kiwipete is tactical.
+        let mut k = pos(KIWI);
+        let mut kl = MoveList::new();
+        generate_legal(&mut k, &mut kl);
+        let cap = kl
+            .as_slice()
+            .iter()
+            .find(|m| piece_on(&k, m.to()).is_some())
+            .expect("kiwi must hold a capture");
+        assert!(is_tactical(&k, *cap));
+    }
+
+    /// Without a TT move, per-stage ordering reproduces the single-list
+    /// MVV-LVA order exactly (tactical keys are all positive, quiet keys
+    /// all zero, and both sorts are stable).
+    #[test]
+    fn staged_order_matches_single_list() {
+        for fen_str in [fen::STARTPOS, KIWI, SCHOLARS] {
+            let b = pos(fen_str);
+            let mut full = MoveList::new();
+            let mut bb = b;
+            generate_legal(&mut bb, &mut full);
+            let mut staged = MoveList::new();
+            staged.moves = full.moves;
+            staged.len = full.len;
+            order_moves(&b, &mut full);
+            let (skip, na) = stage_moves(&b, &mut staged, None);
+            assert_eq!(skip, 0);
+            order_range(&b, &mut staged.moves[..na]);
+            order_range(&b, &mut staged.moves[na..staged.len]);
+            assert_eq!(full.len, staged.len);
+            assert_eq!(full.as_slice(), staged.as_slice());
+        }
+    }
+
+    /// With a TT move, staging pins it front and keeps each stage
+    /// MVV-LVA-descending with tacticals strictly ahead of quiets.
+    #[test]
+    fn staged_tt_pin_and_partition() {
+        let b = pos(KIWI);
+        let mut list = MoveList::new();
+        let mut bb = b;
+        generate_legal(&mut bb, &mut list);
+        let tt = list.moves[0];
+        let (skip, na) = stage_moves(&b, &mut list, Some(tt));
+        assert_eq!((skip, list.moves[0]), (1, tt));
+        order_range(&b, &mut list.moves[1..na]);
+        order_range(&b, &mut list.moves[na..list.len]);
+        let keys: Vec<i32> = list.as_slice().iter().map(|&m| move_score(&b, m)).collect();
+        assert!(keys[1..na].windows(2).all(|w| w[0] >= w[1]));
+        assert!(keys[na..].windows(2).all(|w| w[0] >= w[1]));
+        assert!(list.as_slice()[1..na].iter().all(|&m| is_tactical(&b, m)));
+        assert!(!list.as_slice()[na..].iter().any(|&m| is_tactical(&b, m)));
+    }
+
+    /// Trio diagnostic: per-position stage-A/B cutoff split behind the
+    /// K7 sizing claim (`-- --nocapture` surfaces the numbers; the
+    /// assertions only pin the sane range).
+    #[test]
+    fn k7_trio_fractions() {
+        for (name, fen_str) in [
+            ("kiwi", KIWI),
+            (
+                "p6",
+                "r4rk1/1pp1qppp/p1np1n2/2b1p1B1/2B1P1b1/P1NP1N2/1PP1QPPP/R4RK1 w - - 0 10",
+            ),
+            (
+                "p5",
+                "rnbq1k1r/pp1Pbppp/2p5/8/2B5/8/PPP1NnPP/RNBQK2R w KQ - 1 8",
+            ),
+        ] {
+            let b = pos(fen_str);
+            // Replay iterative deepening on one shared table (as the CLI
+            // does), attributing per-depth counters into one aggregate.
+            let mut agg = Stats::default();
+            let mut tt = SearchTt::new(16);
+            for d in 1..=4u32 {
+                let mut s = Stats::default();
+                let _ = search_best_tt(&b, d, Some(&mut tt), &mut s);
+                agg.cuts_a += s.cuts_a;
+                agg.cuts_b += s.cuts_b;
+                agg.nodes += s.nodes;
+            }
+            println!(
+                "K7 {name}: cuts_a={} cuts_b={} frac={:.3} nodes={}",
+                agg.cuts_a,
+                agg.cuts_b,
+                agg.stage_a_cut_fraction().unwrap_or(-1.0),
+                agg.nodes
+            );
+            let f = agg.stage_a_cut_fraction().expect("trio must cut");
+            assert!((0.0..=1.0).contains(&f));
+        }
+    }
+
+    /// A real search cuts somewhere and the stage-A fraction stays in
+    /// range; an empty search reports no fraction.
+    #[test]
+    fn stage_counters_cover_cutoffs() {
+        let b = pos(KIWI);
+        let mut tt = SearchTt::new(1);
+        let mut stats = Stats::default();
+        assert!(search_best_tt(&b, 3, Some(&mut tt), &mut stats).is_some());
+        let total = stats.cuts_a + stats.cuts_b;
+        assert!(total > 0, "a real search must cut somewhere");
+        let f = stats.stage_a_cut_fraction().expect("cutoffs observed");
+        assert!((0.0..=1.0).contains(&f), "fraction must be in range");
+        assert_eq!(Stats::default().stage_a_cut_fraction(), None);
     }
 
     /// No legal moves means `None`: mated and stalemated sides alike.

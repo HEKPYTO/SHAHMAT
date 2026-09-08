@@ -5,7 +5,8 @@
 use shahmat::board::{Board, Move};
 use shahmat::fen;
 use shahmat::movegen::{generate_legal, has_legal, is_in_check, make, unmake, MoveList};
-use shahmat::search::{evaluate, move_score, order_moves, search_best, MATE};
+use shahmat::search::{evaluate, move_score, order_moves, search_best, search_best_tt, MATE};
+use shahmat::search::{SearchTt, Stats};
 
 /// Side-to-move probe (test helper; engine copy lives in `shahmat::search`).
 #[inline]
@@ -158,6 +159,42 @@ mod suite {
         let (mv, score) = search_best(&b, 1).expect("must have a move");
         assert_eq!((mv.from(), mv.to()), (4, 12), "only Kxe2 refutes");
         assert_eq!(score, 500, "up the exchange after Kxe2");
+    }
+
+    /// K7 staged generation keeps exact scores on the predicate-edge
+    /// trio (EP square live, full castle rights, live promotions) while
+    /// the stage-A cutoff fraction stays in range.
+    #[test]
+    fn k7_staged_exact_on_edge_positions() {
+        for (fen_str, depth) in [
+            ("8/6bb/8/8/R1pP2k1/4P3/P7/K7 b - d3 0 1", 3),
+            (
+                "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+                2,
+            ),
+            (
+                "r3k2r/Pppp1ppp/1b3nbN/nP6/BBP1P3/q4N2/Pp1P2PP/R2Q1RK1 w kq - 0 1",
+                2,
+            ),
+        ] {
+            let b = parse(fen_str);
+            let bare = search_best(&b, depth);
+            let mut tt = SearchTt::new(1);
+            let mut stats = Stats::default();
+            let warm = search_best_tt(&b, depth, Some(&mut tt), &mut stats);
+            match (bare, warm) {
+                (Some((_, bs)), Some((_, ws))) => {
+                    assert_eq!(bs, ws, "staged search must not move scores at {fen_str}")
+                }
+                _ => panic!("both sides must move at {fen_str}"),
+            }
+            let total = stats.cuts_a + stats.cuts_b;
+            assert!(total > 0, "edge search must cut somewhere at {fen_str}");
+            let f = stats
+                .stage_a_cut_fraction()
+                .expect("cutoffs observed at {fen_str}");
+            assert!((0.0..=1.0).contains(&f), "fraction in range at {fen_str}");
+        }
     }
 
     #[test]
