@@ -47,6 +47,7 @@ assert_eq!(g.history_san(), ["e4", "e5"]);
 Scope: no draws of any kind, no board editing. Details: `src/README.md`.
 
 ## Use as a service
+Recommended deployment is the Docker image — the crates.io release is for library use.
 
 ```sh
 shahmat-svc --health-check            # prints ok, exit 0
