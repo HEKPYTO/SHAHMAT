@@ -1,5 +1,5 @@
 //! Search-prototype acceptance suite, driving the lib implementation in
-//! `shahmat::search`: eval sanity, MVV-LVA ranking, deterministic roots,
+//! `shahmat::search`: eval sanity, SEE capture ranking, deterministic roots,
 //! and four mates (one reached through legal [`Game`] play).
 
 use shahmat::board::{Board, Move};
@@ -57,9 +57,12 @@ mod suite {
     }
 
     #[test]
-    fn mvv_lva_ranks_victims_then_attackers() {
-        // White Pe4xd5 wins a queen; white Qd1xd3 wins a rook; Qd1-d2 is
-        // quiet. Squares: e4 = 28, d5 = 35, d1 = 3, d3 = 19, d2 = 11.
+    fn see_orders_winning_first_deep_loss_last() {
+        // White Pe4xd5 wins a queen outright (SEE +900: the d3 rook's
+        // recapture hangs, so black declines) and stays top; white Qd1xd3
+        // wins a rook with only a marginal reply (SEE -400, above the
+        // demotion line) so it keeps its MVV-LVA slot above Qd1-d2 (quiet).
+        // Squares: e4 = 28, d5 = 35, d1 = 3, d3 = 19, d2 = 11.
         let b = parse("4k3/8/8/3q4/4P3/3r4/8/3Q2K1 w - - 0 1");
         let pxq = Move::new(28, 35, 0, 0);
         let qxr = Move::new(3, 19, 4, 0);
@@ -71,6 +74,73 @@ mod suite {
         generate_legal(&mut bb, &mut list);
         order_moves(&b, &mut list);
         assert_eq!((list.moves[0].from(), list.moves[0].to()), (28, 35));
+    }
+
+    #[test]
+    fn see_deep_loss_below_quiet_with_floor() {
+        // White Qd2xd3 grabs a pawn but the e4 pawn recaptures the queen
+        // (SEE -800, past the demotion line): it must sort below quiets yet
+        // stay in-tier via the SEE floor. Squares: d2 = 11, d3 = 19, d1 = 3.
+        let b = parse("4k3/8/8/8/4p3/3p4/3Q4/4K3 w - - 0 1");
+        let deep = Move::new(11, 19, 4, 0);
+        let quiet = Move::new(11, 3, 4, 0);
+        assert!(move_score(&b, deep) < 0, "deep loss sorts below quiets");
+        assert!(move_score(&b, deep) < move_score(&b, quiet));
+        assert!(
+            move_score(&b, deep) > -1_002_001,
+            "SEE floor keeps deep losses in-tier"
+        );
+    }
+
+    #[test]
+    fn see_negative_sac_mate_still_found() {
+        // Scholars Qh5xf7+ is SEE-negative (the e8 king recaptures for free
+        // statically) yet delivers mate: ordering must never hide it.
+        // Squares: h5 = 39, f7 = 53, h6 = 47.
+        let b = parse("r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNBQK1NR w KQkq - 4 4");
+        let sac = Move::new(39, 53, 4, 0);
+        let quiet = Move::new(39, 47, 4, 0);
+        assert!(move_score(&b, sac) < move_score(&b, quiet));
+        let (mv, score) = search_best(&b, 2).expect("mate must exist");
+        assert!(score > MATE - 1000, "sac-mate must score mate-range");
+        let mut after = b;
+        let undo = make(&mut after, mv);
+        assert!(!has_legal(&mut after, false), "mate must leave no reply");
+        unmake(&mut after, undo, mv);
+    }
+
+    #[test]
+    fn castle_scores_nonzero_above_quiet() {
+        // Static scoring only (no legality needed): e1g1 castles (king two
+        // files), e1e2 and e1f1 are plain king steps to empty squares.
+        // Squares: e1 = 4, e2 = 12, f1 = 5, g1 = 6.
+        let b = parse("4k3/8/8/8/8/8/8/4K3 w - - 0 1");
+        let castle = Move::new(4, 6, 5, 0);
+        let quiet = Move::new(4, 12, 5, 0);
+        let king_step = Move::new(4, 5, 5, 0);
+        assert_eq!(move_score(&b, quiet), 0);
+        assert_eq!(move_score(&b, king_step), 0);
+        assert!(move_score(&b, castle) > move_score(&b, quiet));
+    }
+
+    #[test]
+    fn quiet_promotion_above_quiet() {
+        // Pawn e7 promotes quietly on e8; Ke1-e2 is quiet.
+        // Squares: e7 = 52, e8 = 60, e1 = 4, e2 = 12.
+        let b = parse("4k3/4P3/8/8/8/8/8/4K3 w - - 0 1");
+        let promo = Move::new(52, 60, 0, 4);
+        let quiet = Move::new(4, 12, 5, 0);
+        assert!(move_score(&b, promo) > move_score(&b, quiet));
+    }
+
+    #[test]
+    fn ep_capture_scores_as_winning_pawn_take() {
+        // White pawn e5 takes d6 en passant, winning a pawn for free.
+        // Squares: e5 = 36, d6 = 43.
+        let b = parse("4k3/8/8/3pP3/8/8/8/4K3 w - d6 0 1");
+        let ep = Move::new(36, 43, 0, 0);
+        let quiet = Move::new(4, 12, 5, 0);
+        assert!(move_score(&b, ep) > move_score(&b, quiet));
     }
 
     #[test]

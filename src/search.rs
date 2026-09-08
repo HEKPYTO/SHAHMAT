@@ -16,16 +16,16 @@
 //! ## Scope
 //!
 //! K1 quiescence at the horizon (depth-0 nodes): stand-pat STM eval,
-//! captures + promotions only (MVV-LVA ordered), full-legal evasion while
-//! in check, and a [`MAX_QPLY`] cap falling back to stand-pat. No SEE
-//! pruning (deferred to the K4 ticket), no other pruning, no reductions,
-//! no aspiration: those are engine tickets, out of lib scope. This module
-//! is the lib-scoped search substrate (mate solver + exact cache + staged
-//! substrate for ordering).
+//! captures + promotions only (SEE ordered), full-legal evasion while
+//! in check, and a [`MAX_QPLY`] cap falling back to stand-pat. K4 orders
+//! captures by SEE but never prunes on it (no futility/razoring-style cuts),
+//! and there are no other prunings, no reductions, no aspiration: those are
+//! engine tickets, out of lib scope. This module is the lib-scoped search
+//! substrate (mate solver + exact cache + staged substrate for ordering).
 //!
 //! K7 staged generation at interior nodes: one [`generate_legal`] fill is
 //! searched as TT-best-first plus captures/promotions (stage A, ordered
-//! eagerly), then quiets (stage B, MVV-LVA-ordered lazily only while
+//! eagerly), then quiets (stage B, SEE-ordered lazily only while
 //! `alpha < beta`). A stage-A cutoff skips stage-B ordering entirely. The
 //! horizon is untouched: depth-0 nodes route to quiescence, and quiescence
 //! itself is never staged. [`Stats`] records the stage-A cutoff fraction.
@@ -34,6 +34,7 @@
 //! TT plumb-through stays in `negamax`/root only, so cached bounds keep
 //! their exact-depth meaning.
 
+use crate::attacks::{bishop_attacks, rook_attacks};
 use crate::board::{board_hash, Board, Move};
 use crate::movegen::{generate_legal, is_in_check, make, unmake, MoveList};
 
@@ -78,29 +79,266 @@ fn piece_on(b: &Board, sq: u8) -> Option<usize> {
     (0..6).find(|&p| b.occupancies[p] & bit != 0)
 }
 
-/// MVV-LVA ordering key (highest first): most valuable victim, least
-/// valuable attacker; promotion bonus by placed-piece value. Quiet moves
-/// score 0. En passant (diagonal pawn move to an empty square) counts as a
-/// pawn capture.
-pub fn move_score(b: &Board, mv: Move) -> i32 {
+/// Ordering tiers for [`move_score`] (highest first): captures with SEE
+/// above `SEE_DEMOTE` (MVV-LVA within the kept tier), quiet promotions,
+/// castling, quiets, then deeply SEE-negative captures least-bad-first.
+/// Tiers never prune — every legal move is still searched, so losing
+/// sac-mates (e.g. a SEE-negative queen sac delivering mate) are always
+/// found; order only decides how fast cutoffs land.
+const GOOD_CAP_BASE: i32 = 1_000_000;
+const QUIET_PROMO_BASE: i32 = 100_000;
+const CASTLE_SCORE: i32 = 1_000;
+const BAD_CAP_BASE: i32 = -1_000_000;
+/// SEE floor guard: losing-capture scores clamp here so the worst sacs stay
+/// in-tier (below every quiet, above nothing else) instead of drifting on
+/// unbounded material swings. Worse than any single-piece loss (-900).
+const SEE_FLOOR: i32 = -2_000;
+/// Demotion threshold: only captures losing more than an exchange (-500)
+/// drop below quiets. Marginally-negative exchanges keep their MVV-LVA slot
+/// — static SEE is blind to pins and tactics, so near-zero scores routinely
+/// misevaluate positions where the "losing" capture is the refutation.
+const SEE_DEMOTE: i32 = -500;
+
+/// True for captures (including en passant, a diagonal pawn move to an empty
+/// square). Promotions are handled separately by the caller.
+#[inline]
+fn is_capture(b: &Board, mv: Move) -> bool {
+    if piece_on(b, mv.to()).is_some() {
+        return true;
+    }
+    mv.mover() == 0 && (mv.from() & 7) != (mv.to() & 7)
+}
+
+/// True for castling: a king moving two files (no other legal king move does
+/// that, and the to-square is empty so it never reads as a capture).
+#[inline]
+fn is_castle(mv: Move) -> bool {
+    mv.mover() == 5 && (mv.from() & 7).abs_diff(mv.to() & 7) == 2
+}
+
+/// Classic MVV-LVA victim/attacker key (victim-descending, attacker-
+/// ascending), plus the placed-piece value on promotions. Used to order
+/// within SEE tiers where victim-first beats net-first.
+fn mvv_lva(b: &Board, mv: Move) -> i32 {
     let attacker = VAL[mv.mover() as usize];
-    let mut s = 0;
-    match piece_on(b, mv.to()) {
-        Some(victim) => s += 10 * VAL[victim] - attacker,
+    let mut s = match piece_on(b, mv.to()) {
+        Some(victim) => 10 * VAL[victim] - attacker,
         None => {
             if mv.mover() == 0 && (mv.from() & 7) != (mv.to() & 7) {
-                s += 10 * VAL[0] - attacker;
+                10 * VAL[0] - attacker
+            } else {
+                0
             }
         }
-    }
+    };
     if mv.is_promotion() {
         s += VAL[mv.promo() as usize];
     }
     s
 }
 
-/// In-place descending sort by MVV-LVA key (insertion sort; lists are tiny).
-/// Public as the ordering primitive behind staged generation work.
+/// Knight attacker squares of `sq` masked with `knights`.
+fn knight_attackers_to(sq: u8, knights: u64) -> u64 {
+    const D: [(i8, i8); 8] = [
+        (1, 2),
+        (2, 1),
+        (2, -1),
+        (1, -2),
+        (-1, -2),
+        (-2, -1),
+        (-2, 1),
+        (-1, 2),
+    ];
+    let f = (sq & 7) as i8;
+    let r = (sq >> 3) as i8;
+    let mut m = 0u64;
+    let mut i = 0;
+    while i < 8 {
+        let nf = f + D[i].0;
+        let nr = r + D[i].1;
+        if (0..8).contains(&nf) && (0..8).contains(&nr) {
+            m |= 1u64 << (nr as u8 * 8 + nf as u8);
+        }
+        i += 1;
+    }
+    m & knights
+}
+
+/// King attacker squares of `sq` masked with `kings`.
+fn king_attackers_to(sq: u8, kings: u64) -> u64 {
+    let f = (sq & 7) as i8;
+    let r = (sq >> 3) as i8;
+    let mut m = 0u64;
+    let mut df = -1i8;
+    while df <= 1 {
+        let mut dr = -1i8;
+        while dr <= 1 {
+            if df != 0 || dr != 0 {
+                let nf = f + df;
+                let nr = r + dr;
+                if (0..8).contains(&nf) && (0..8).contains(&nr) {
+                    m |= 1u64 << (nr as u8 * 8 + nf as u8);
+                }
+            }
+            dr += 1;
+        }
+        df += 1;
+    }
+    m & kings
+}
+
+/// Pawn attackers of `sq`: white pawns sit one rank below the target, black
+/// pawns one rank above (file guards on the target square prevent wrap).
+fn pawn_attackers_to(sq: u8, white_pawns: u64, black_pawns: u64) -> u64 {
+    let t = 1u64 << sq;
+    let f = sq & 7;
+    let mut w = 0u64;
+    let mut bl = 0u64;
+    if f < 7 {
+        w |= t >> 7;
+        bl |= t << 9;
+    }
+    if f > 0 {
+        w |= t >> 9;
+        bl |= t << 7;
+    }
+    (w & white_pawns) | (bl & black_pawns)
+}
+
+/// Every piece of side `by_white` attacking `sq` under `occ`. Piece boards
+/// come from the caller's mutable SEE copies (already minus removed pieces);
+/// `white`/`black` are the matching colour masks.
+fn attackers_to(sq: u8, pc: &[u64; 6], white: u64, black: u64, occ: u64, by_white: bool) -> u64 {
+    let own = if by_white { white } else { black };
+    let mut a = pawn_attackers_to(sq, pc[0] & white, pc[0] & black);
+    a |= knight_attackers_to(sq, pc[1] & own);
+    a |= king_attackers_to(sq, pc[5] & own);
+    a |= bishop_attacks(sq, occ) & (pc[2] | pc[4]) & own;
+    a |= rook_attacks(sq, occ) & (pc[3] | pc[4]) & own;
+    a
+}
+
+/// Static exchange evaluation of a capture from the side-to-move's view:
+/// net material won if the capture is played and both sides reply with
+/// least-valuable-attacker recaptures (x-ray lines open as pieces leave).
+/// Positive means the exchange wins material; negative means it loses.
+/// Pins and legality are ignored — this is an ordering hint, never a prune.
+fn see_capture(b: &Board, mv: Move) -> i32 {
+    let white = stm_white(b);
+    let from = mv.from();
+    let to = mv.to();
+    let ep = mv.mover() == 0 && (from & 7) != (to & 7) && piece_on(b, to).is_none();
+    let mut victim = match piece_on(b, to) {
+        Some(p) => VAL[p],
+        None => 0,
+    };
+    if ep {
+        victim = VAL[0];
+    }
+    let promo = mv.promo() as usize;
+    let first = victim + if promo == 0 { 0 } else { VAL[promo] - VAL[0] };
+    let mut on_sq = if promo == 0 {
+        mv.mover() as usize
+    } else {
+        promo
+    };
+    let mut pc = [
+        b.occupancies[0],
+        b.occupancies[1],
+        b.occupancies[2],
+        b.occupancies[3],
+        b.occupancies[4],
+        b.occupancies[5],
+    ];
+    pc[mv.mover() as usize] &= !(1u64 << from);
+    let mut occ = b.occupancies[8] & !(1u64 << from);
+    if ep {
+        let cap = if white { to - 8 } else { to + 8 };
+        pc[0] &= !(1u64 << cap);
+        occ &= !(1u64 << cap);
+    }
+    let white_bb = b.occupancies[6] & occ;
+    let black_bb = b.occupancies[7] & occ;
+    // Successive capture gains: cap[0] is ours, then alternating replies.
+    // At most one capture per attacker, so 32 slots always suffice.
+    let mut cap = [0i32; 32];
+    cap[0] = first;
+    let mut n = 1usize;
+    let mut foe_white = !white;
+    while n < 32 {
+        if on_sq == 5 {
+            break; // a king on the square cannot be captured
+        }
+        let atk = attackers_to(to, &pc, white_bb & occ, black_bb & occ, occ, foe_white);
+        if atk == 0 {
+            break;
+        }
+        // Least valuable attacker first; the king (index 5) sorts last.
+        let mut p = 0usize;
+        while p < 6 && pc[p] & atk == 0 {
+            p += 1;
+        }
+        if p == 6 {
+            break;
+        }
+        let bit = 1u64 << (pc[p] & atk).trailing_zeros();
+        pc[p] &= !bit;
+        occ &= !bit;
+        cap[n] = VAL[on_sq];
+        on_sq = p;
+        n += 1;
+        foe_white = !foe_white;
+    }
+    // Backward induction with optimal stopping: the side to move at ply `k`
+    // captures only if it improves its own total (us max, foe min).
+    let mut future = 0i32;
+    let mut k = n;
+    while k > 1 {
+        k -= 1;
+        if k & 1 == 1 {
+            future = (-cap[k] + future).min(0);
+        } else {
+            future = (cap[k] + future).max(0);
+        }
+    }
+    first + future
+}
+
+/// SEE ordering key (highest first): captures with SEE above `SEE_DEMOTE`
+/// first (MVV-LVA within the kept tier), then quiet promotions by
+/// placed-piece value, castling (small fixed bonus), quiets (0), and finally
+/// deeply SEE-negative captures least-bad-first with a `SEE_FLOOR` guard.
+/// En passant counts as a pawn capture. There is deliberately no check
+/// bonus: checks ride with their tier, so an unsafe sac-check can never
+/// jump the order.
+pub fn move_score(b: &Board, mv: Move) -> i32 {
+    if mv.is_promotion() {
+        if piece_on(b, mv.to()).is_some() {
+            let s = see_capture(b, mv);
+            if s > SEE_DEMOTE {
+                return GOOD_CAP_BASE + mvv_lva(b, mv);
+            }
+            return BAD_CAP_BASE + s.clamp(SEE_FLOOR, -1);
+        }
+        return QUIET_PROMO_BASE + VAL[mv.promo() as usize];
+    }
+    if is_capture(b, mv) {
+        let s = see_capture(b, mv);
+        if s > SEE_DEMOTE {
+            return GOOD_CAP_BASE + mvv_lva(b, mv);
+        }
+        return BAD_CAP_BASE + s.clamp(SEE_FLOOR, -1);
+    }
+    if is_castle(mv) {
+        return CASTLE_SCORE;
+    }
+    0
+}
+
+/// In-place descending sort by SEE key (insertion sort; lists are tiny).
+/// Keys are computed once per move, so each capture pays one SEE walk.
+/// Stable: equal keys keep generation order. Public as the ordering
+/// primitive behind staged generation work.
 pub fn order_moves(b: &Board, list: &mut MoveList) {
     let len = list.len;
     order_range(b, &mut list.moves[..len]);
@@ -108,16 +346,25 @@ pub fn order_moves(b: &Board, list: &mut MoveList) {
 
 /// Same insertion sort over a caller-chosen slice (one search stage).
 /// No allocation; used to order stage B lazily only when it is reached.
+/// Keys are computed once per move, so each capture pays one SEE walk.
 fn order_range(b: &Board, moves: &mut [Move]) {
+    let mut keys = [0i32; crate::board::MOVELIST_CAP];
+    let mut i = 0usize;
+    while i < moves.len() {
+        keys[i] = move_score(b, moves[i]);
+        i += 1;
+    }
     for i in 1..moves.len() {
         let mv = moves[i];
-        let key = move_score(b, mv);
+        let key = keys[i];
         let mut j = i;
-        while j > 0 && move_score(b, moves[j - 1]) < key {
+        while j > 0 && keys[j - 1] < key {
             moves[j] = moves[j - 1];
+            keys[j] = keys[j - 1];
             j -= 1;
         }
         moves[j] = mv;
+        keys[j] = key;
     }
 }
 
@@ -414,9 +661,12 @@ fn is_tactical(b: &Board, mv: Move) -> bool {
 /// of every sort so TT-best-first survives), stage A is `moves[skip..na]`
 /// (TT slot plus tacticals), stage B is `moves[na..]` (quiets). One
 /// [`Move`] of stack scratch, no heap, so the zero-alloc harness stays
-/// green. Exactness note: every tactical key is positive and every quiet
-/// key is zero, so per-stage MVV-LVA sorts reproduce the single-list
-/// order (TT slot aside).
+/// green. Exactness note: the partition is by selection ([`is_tactical`]),
+/// independent of sort keys, and both stages are fully searched — so SEE
+/// tiers (bad captures below quiets, castles above) change cutoff speed,
+/// never completeness. Per-stage sorts no longer reproduce the single-list
+/// order key-for-key (TT slot aside); the covered invariant is partition
+/// completeness, tested in `staged_partition_covers_all`.
 fn stage_moves(b: &Board, list: &mut MoveList, tt_best: Option<Move>) -> (usize, usize) {
     let mut skip = 0;
     if let Some(tt) = tt_best {
@@ -447,7 +697,7 @@ fn stage_moves(b: &Board, list: &mut MoveList, tt_best: Option<Move>) -> (usize,
 /// and checks out of the leaf eval. Exact terminals first (no legal moves
 /// means mate or stalemate, as in [`negamax`]); in check the full legal
 /// evasion set is searched; otherwise stand-pat bounds the window and only
-/// captures + promotions are tried, MVV-LVA ordered. Fail-soft, no
+/// captures + promotions are tried, SEE ordered. Fail-soft, no
 /// allocation, and deliberately table-free (no probe, no store).
 fn quiescence(
     b: &mut Board,
@@ -685,7 +935,7 @@ pub fn search_best_tt(
     Some((best_mv, best))
 }
 
-/// Fixed-depth root search without a table (bare negamax + MVV-LVA).
+/// Fixed-depth root search without a table (bare negamax + SEE ordering).
 pub fn search_best(board: &Board, depth: u32) -> Option<(Move, i32)> {
     search_best_tt(board, depth, None, &mut Stats::default())
 }
@@ -828,11 +1078,12 @@ mod tests {
         assert!(is_tactical(&k, *cap));
     }
 
-    /// Without a TT move, per-stage ordering reproduces the single-list
-    /// MVV-LVA order exactly (tactical keys are all positive, quiet keys
-    /// all zero, and both sorts are stable).
+    /// Without a TT move, staging covers every generated move exactly once:
+    /// stage A holds precisely the tacticals, stage B the quiets (partition
+    /// by selection, independent of SEE sort keys), and each stage sorts
+    /// deterministically (repeat sorts agree).
     #[test]
-    fn staged_order_matches_single_list() {
+    fn staged_partition_covers_all() {
         for fen_str in [fen::STARTPOS, KIWI, SCHOLARS] {
             let b = pos(fen_str);
             let mut full = MoveList::new();
@@ -841,18 +1092,28 @@ mod tests {
             let mut staged = MoveList::new();
             staged.moves = full.moves;
             staged.len = full.len;
-            order_moves(&b, &mut full);
             let (skip, na) = stage_moves(&b, &mut staged, None);
             assert_eq!(skip, 0);
+            assert!(staged.moves[..na].iter().all(|&m| is_tactical(&b, m)));
+            assert!(staged.moves[na..staged.len]
+                .iter()
+                .all(|&m| !is_tactical(&b, m)));
+            let mut a: Vec<Move> = staged.moves[..staged.len].to_vec();
+            a.sort_by_key(|m| (m.from(), m.to(), m.mover(), m.promo()));
+            let mut f: Vec<Move> = full.as_slice().to_vec();
+            f.sort_by_key(|m| (m.from(), m.to(), m.mover(), m.promo()));
+            assert_eq!(f, a);
             order_range(&b, &mut staged.moves[..na]);
             order_range(&b, &mut staged.moves[na..staged.len]);
-            assert_eq!(full.len, staged.len);
-            assert_eq!(full.as_slice(), staged.as_slice());
+            let once = staged.moves[..staged.len].to_vec();
+            order_range(&b, &mut staged.moves[..na]);
+            order_range(&b, &mut staged.moves[na..staged.len]);
+            assert_eq!(once, &staged.moves[..staged.len]);
         }
     }
 
     /// With a TT move, staging pins it front and keeps each stage
-    /// MVV-LVA-descending with tacticals strictly ahead of quiets.
+    /// SEE-descending with tacticals strictly ahead of quiets.
     #[test]
     fn staged_tt_pin_and_partition() {
         let b = pos(KIWI);
