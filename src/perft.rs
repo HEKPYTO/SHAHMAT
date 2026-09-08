@@ -293,9 +293,23 @@ fn full_tt(b: &mut Board, depth: u32, tt: &mut Tt) -> u64 {
     if depth == 0 {
         return 1;
     }
+    if depth == 1 {
+        // Exact-fringe bypass: no hash/probe/store; count is list len.
+        let mut list = MoveList::new();
+        generate_legal(b, &mut list);
+        return list.len as u64;
+    }
     let key = board_hash(b);
     if let Some(n) = tt.probe(key, depth) {
         return n;
+    }
+    if depth == 2 {
+        // Miss-path fringe narrowing: probe/store above are untouched (all
+        // within-run and cross-run hits preserved), but a miss expands via
+        // the bulk horizon — no make/unmake or MoveList below. Exact total.
+        let nodes = count_bulk2(b);
+        tt.store(key, depth, nodes);
+        return nodes;
     }
     let mut list = MoveList::new();
     generate_legal(b, &mut list);

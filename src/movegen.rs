@@ -72,7 +72,8 @@
 //! | 2         | captured piece index 0–5, 8 = none           |
 //! | 3         | captured square 0–63, 64 = none              |
 //! | 4         | moved piece index 0–5 (pawn on promotions)   |
-//! | 5–7       | zero                                         |
+//! | 5         | normal-capture same bit (0/1), else 0        |
+//! | 6–7       | zero                                         |
 //!
 //! `unmake` restores `state` verbatim and reverses the bitboard edits, so
 //! make/unmake round-trips are bit-exact (see the round-trip test).
@@ -1275,6 +1276,12 @@ fn emit_ep<S: MoveSink, const WHITE: bool>(
     if b.occupancies[PAWN] & foe & cap_bit == 0 {
         return;
     }
+    // Slider-gate: the ray tests below exist only for the vacated victim
+    // square (the mover's vacate is pin-covered above; the landing only adds
+    // occupancy). No shared queen-line king<->victim ⇒ both rays test empty.
+    let df = (ksq & 7) as i8 - (cap_sq & 7) as i8;
+    let dr = (ksq >> 3) as i8 - (cap_sq >> 3) as i8;
+    let slider_live = have_king && (df == 0 || dr == 0 || df == dr || df == -dr);
     while attackers != 0 {
         let from = attackers.trailing_zeros() as u8;
         attackers &= attackers - 1;
@@ -1284,7 +1291,7 @@ fn emit_ep<S: MoveSink, const WHITE: bool>(
         if check_mask != !0u64 && cap_bit & check_mask == 0 && ep_bit & check_mask == 0 {
             continue;
         }
-        if have_king {
+        if slider_live {
             let new_occ = (occ ^ (1u64 << from) ^ cap_bit) | ep_bit;
             if rook_attacks(ksq, new_occ) & (b.occupancies[ROOK] | b.occupancies[QUEEN]) & foe != 0
             {
@@ -1962,7 +1969,7 @@ pub fn make(b: &mut Board, mv: Move) -> StateInfo {
         captured = PAWN as u64;
     }
 
-    let undo = StateInfo {
+    let mut undo = StateInfo {
         data: [
             b.state[0],
             b.state[1],
@@ -1992,6 +1999,7 @@ pub fn make(b: &mut Board, mv: Move) -> StateInfo {
         // (victim bit doubles as the landing bit) folds to a from-only XOR
         // with the victim clear masked to a no-op, no extra branch.
         let same = ((captured as usize) == piece) as u64;
+        undo.data[5] = same;
         b.occupancies[piece] ^= delta ^ (same * to_bit);
         b.occupancies[captured as usize] &= !((1 - same) * to_bit);
         b.occupancies[own_i] ^= delta;
@@ -2107,7 +2115,9 @@ pub fn unmake(b: &mut Board, undo: StateInfo, mv: Move) {
         b.occupancies[own_i] ^= delta;
         b.occupancies[OCC] ^= delta;
     } else if promo == 0 && cap_sq == to {
-        let same = ((captured as usize) == piece) as u64;
+        // `same` rides undo.data[5] from make (same leg pairing): drops a
+        // compare + 2 muls per normal-capture unmake, no new branches.
+        let same = undo.data[5];
         b.occupancies[captured as usize] |= (1 - same) * to_bit;
         b.occupancies[piece] ^= delta ^ (same * to_bit);
         b.occupancies[own_i] ^= delta;
