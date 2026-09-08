@@ -571,6 +571,8 @@ impl Game {
     }
 
     /// Back to the initial FEN with empty history (headers kept).
+    /// The adjudication flag is preserved (unlike [`Game::from_fen`], which
+    /// always starts it on): toggling draws off survives position loads.
     pub fn reset(&mut self) {
         if let Ok(board) = fen::parse(&self.initial_fen) {
             self.board = board;
@@ -580,7 +582,7 @@ impl Game {
     }
 
     /// Load a new FEN: clears history, keeps headers, and becomes the new
-    /// [`Game::reset`] target.
+    /// [`Game::reset`] target. The adjudication flag is preserved.
     pub fn load_fen(&mut self, fen_str: &str) -> Result<(), GameError> {
         self.board = fen::parse(fen_str)?;
         self.history.clear();
@@ -636,6 +638,7 @@ impl Game {
 
     /// Load the first game of a PGN string: tags become headers, the `FEN`
     /// tag (or startpos) becomes the position, and its moves replay.
+    /// The adjudication flag is preserved.
     pub fn load_pgn(&mut self, src: &str) -> Result<(), GameError> {
         let games = pgn::load_pgn(src)?;
         let game = games

@@ -46,9 +46,15 @@ pub fn perft_count(fen_str: &str, depth: u32) -> Result<u64, String> {
 
 /// Per-root-move `(text, nodes)` rows in fixed generation order.
 /// Row counts sum to [`perft_count`] at the same depth.
+/// `Err` on bad FEN, `depth > MAX_DEPTH`, or depth 0 (no root moves: an
+/// empty row list would sum to 0 next to [`perft_count`]'s 1 — the CLI
+/// rejects this too).
 pub fn divide_counts(fen_str: &str, depth: u32) -> Result<Vec<(String, u64)>, String> {
     let board = parse_board(fen_str)?;
     check_depth(depth)?;
+    if depth == 0 {
+        return Err("divide needs depth >= 1 (depth 0 has no root moves)".to_string());
+    }
     Ok(divide(&board, depth)
         .into_iter()
         .map(|row| (row.text, row.nodes))
@@ -136,6 +142,11 @@ mod tests {
         assert_eq!(perft_count(STARTPOS, 2), Ok(400));
         assert_eq!(perft_count(STARTPOS, 3), Ok(8_902));
         assert_eq!(perft_count(STARTPOS, 4), Ok(197_281));
+    }
+
+    #[test]
+    fn divide_depth_zero_is_an_error() {
+        assert!(divide_counts(STARTPOS, 0).is_err());
     }
 
     #[test]

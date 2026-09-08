@@ -48,7 +48,9 @@ fn main() -> ExitCode {
             "--jobs" => {
                 i += 1;
                 match rest.get(i).and_then(|s| s.parse().ok()) {
-                    Some(n) if n >= 1 => jobs = n,
+                    // Threads are real: cap like `--tt` (live prefixes bound
+                    // the actual spawn count below this).
+                    Some(n) if (1..=1024).contains(&n) => jobs = n,
                     _ => return usage(),
                 }
             }
@@ -225,12 +227,6 @@ fn count_prefix_chunk(
     debug_assert!(depth >= 2);
     let mut total = 0u64;
     let (mut probes, mut hits) = (0u64, 0u64);
-    // Bulk2/Full differ only in the leaf counter: pick it once (Tt keeps
-    // its own table-plumbed loop below).
-    let plain: fn(&Board, u32) -> u64 = match mode {
-        Mode::Full => perft,
-        _ => perft_bulk,
-    };
     if let Mode::Tt(mb) = mode {
         // One table per worker chunk: keys are full-hash+depth, so
         // sharing across the chunk's prefixes keeps totals exact.
@@ -244,6 +240,14 @@ fn count_prefix_chunk(
         probes += tt.probes();
         hits += tt.hits();
     } else {
+        // Bulk2/Full differ only in the leaf counter: picked here, where it
+        // is used, so the Tt arm above can never route through it and
+        // silently drop caching.
+        let plain: fn(&Board, u32) -> u64 = if matches!(mode, Mode::Full) {
+            perft
+        } else {
+            perft_bulk
+        };
         for &(m1, m2) in chunk {
             let mut child = *board;
             make(&mut child, m1);
