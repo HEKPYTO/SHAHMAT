@@ -15,9 +15,17 @@
 //!
 //! ## Scope
 //!
-//! No quiescence, no pruning, no reductions, no aspiration: those are
-//! engine tickets, out of lib scope. This module is the lib-scoped search
-//! substrate (mate solver + exact cache + staged substrate for ordering).
+//! K1 quiescence at the horizon (depth-0 nodes): stand-pat STM eval,
+//! captures + promotions only (MVV-LVA ordered), full-legal evasion while
+//! in check, and a [`MAX_QPLY`] cap falling back to stand-pat. No SEE
+//! pruning (deferred to the K4 ticket), no other pruning, no reductions,
+//! no aspiration: those are engine tickets, out of lib scope. This module
+//! is the lib-scoped search substrate (mate solver + exact cache + staged
+//! substrate for ordering).
+//!
+//! The quiescence horizon never touches the table (no probe, no store):
+//! TT plumb-through stays in `negamax`/root only, so cached bounds keep
+//! their exact-depth meaning.
 
 use crate::board::{board_hash, Board, Move};
 use crate::movegen::{generate_legal, is_in_check, make, unmake, MoveList};
@@ -347,10 +355,112 @@ pub struct IterRow {
     pub nodes: u64,
 }
 
+/// Quiescence horizon depth cap (plies of captures/promotions past the
+/// depth-0 node). Past the cap the search falls back to stand-pat so the
+/// horizon always terminates, even in open checking lines.
+pub const MAX_QPLY: i32 = 8;
+
+/// True for quiescence moves: captures (including en passant, a diagonal
+/// pawn move to an empty square) and any promotion. Mirrors the tactical
+/// half of [`move_score`] so ordering and selection agree on what is
+/// tactical.
+#[inline]
+fn is_tactical(b: &Board, mv: Move) -> bool {
+    if mv.is_promotion() {
+        return true;
+    }
+    if piece_on(b, mv.to()).is_some() {
+        return true;
+    }
+    mv.mover() == 0 && (mv.from() & 7) != (mv.to() & 7)
+}
+
+/// Quiescence search over the depth-0 horizon: calms captures, promotions,
+/// and checks out of the leaf eval. Exact terminals first (no legal moves
+/// means mate or stalemate, as in [`negamax`]); in check the full legal
+/// evasion set is searched; otherwise stand-pat bounds the window and only
+/// captures + promotions are tried, MVV-LVA ordered. Fail-soft, no
+/// allocation, and deliberately table-free (no probe, no store).
+fn quiescence(
+    b: &mut Board,
+    mut alpha: i32,
+    beta: i32,
+    ply: i32,
+    qply: i32,
+    stats: &mut Stats,
+) -> i32 {
+    stats.nodes += 1;
+    let white = stm_white(b);
+    let check = is_in_check(b, white);
+    let mut list = MoveList::new();
+    generate_legal(b, &mut list);
+    if list.len == 0 {
+        return if check { -MATE + ply } else { 0 };
+    }
+    if check {
+        // Evasion: every legal reply, even quiets — standing pat while in
+        // check would score an illegal position. Past the cap, fall back
+        // to the static eval rather than searching forever.
+        if qply >= MAX_QPLY {
+            return evaluate(b);
+        }
+        order_moves(b, &mut list);
+        let mut best = -INF;
+        for i in 0..list.len {
+            let mv = list.moves[i];
+            let undo = make(b, mv);
+            let s = -quiescence(b, -beta, -alpha, ply + 1, qply + 1, stats);
+            unmake(b, undo, mv);
+            if s > best {
+                best = s;
+            }
+            if s > alpha {
+                alpha = s;
+            }
+            if alpha >= beta {
+                break;
+            }
+        }
+        return best;
+    }
+    let stand = evaluate(b);
+    if stand >= beta {
+        return stand;
+    }
+    if stand > alpha {
+        alpha = stand;
+    }
+    if qply >= MAX_QPLY {
+        return alpha;
+    }
+    order_moves(b, &mut list);
+    let mut best = stand;
+    for i in 0..list.len {
+        let mv = list.moves[i];
+        if !is_tactical(b, mv) {
+            continue;
+        }
+        let undo = make(b, mv);
+        let s = -quiescence(b, -beta, -alpha, ply + 1, qply + 1, stats);
+        unmake(b, undo, mv);
+        if s > best {
+            best = s;
+        }
+        if s > alpha {
+            alpha = s;
+        }
+        if alpha >= beta {
+            break;
+        }
+    }
+    best
+}
+
 /// Negamax with alpha-beta over a fixed depth, TT-backed. Terminals are
 /// exact: no legal moves means mate (`-MATE + ply`, faster mates higher)
-/// or stalemate (0), checked before the depth cutoff. With an empty table
-/// this equals the bare negamax exactly.
+/// or stalemate (0), checked before the depth cutoff. Depth-0 nodes route
+/// to [`quiescence`], which never probes or stores the table. With an
+/// empty table this equals the bare negamax-plus-quiescence exactly.
 fn negamax(
     b: &mut Board,
     depth: u32,
@@ -372,7 +482,7 @@ fn negamax(
         };
     }
     if depth == 0 {
-        return evaluate(b);
+        return quiescence(b, alpha, beta, ply, 0, stats);
     }
     let key = board_hash(b);
     let mut tt_best = None;

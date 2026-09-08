@@ -102,6 +102,64 @@ mod suite {
         assert_mates("7k/5Q2/6K1/8/8/8/8/8 w - - 0 1", 2);
     }
 
+    /// Trap bait must still look tempting statically: after the trap
+    /// capture the side-to-move eval favors the trapper, so a horizon
+    /// without quiescence would play it. Quiescence must see the recapture.
+    fn assert_trap_avoided(fen_str: &str, trap_from: u8, trap_to: u8, bait_for_trapper: i32) {
+        let b = parse(fen_str);
+        let trap = Move::new(trap_from, trap_to, 4, 0);
+        let mut after = b;
+        let undo = make(&mut after, trap);
+        // Static eval is from the (opponent) side to move's view; negate
+        // for the trapper's view of the bait.
+        assert_eq!(
+            -evaluate(&after),
+            bait_for_trapper,
+            "trap in {fen_str} must bait statically"
+        );
+        unmake(&mut after, undo, trap);
+        assert_eq!(after, b, "make/unmake must round-trip");
+        let (mv, _) = search_best(&b, 1).expect("trap position must have a move");
+        assert_ne!(
+            (mv.from(), mv.to()),
+            (trap_from, trap_to),
+            "quiescence must not whiff into the trap in {fen_str}"
+        );
+    }
+
+    #[test]
+    fn qs_dodges_queen_takes_defended_rook() {
+        // 1.Qxd5 statically wins a rook (+800) but e6xd5 recaptures
+        // the queen: quiescence must not play it at depth 1.
+        assert_trap_avoided("4k3/8/4p3/3r4/8/8/8/3QK3 w - - 0 1", 3, 35, 800);
+        let b = parse("4k3/8/4p3/3r4/8/8/8/3QK3 w - - 0 1");
+        let (_, score) = search_best(&b, 1).expect("must have a move");
+        assert_eq!(score, 300, "up Q-vs-R+P with the trap refuted");
+    }
+
+    #[test]
+    fn qs_dodges_queen_takes_defended_pawn() {
+        // 1.Qxd5 statically breaks even (0: queen for queen, pawn gone)
+        // while every quiet stays down a pawn (-100), so a naive horizon
+        // still bites — but Qe6xd5 recaptures the queen, and quiescence
+        // must not play it at depth 1.
+        assert_trap_avoided("4k3/8/4q3/3p4/8/8/Q7/4K3 w - - 0 1", 8, 35, 0);
+        let b = parse("4k3/8/4q3/3p4/8/8/Q7/4K3 w - - 0 1");
+        let (_, score) = search_best(&b, 1).expect("must have a move");
+        assert_eq!(score, -100, "down a pawn with the trap refuted");
+    }
+
+    #[test]
+    fn qs_evasion_captures_out_of_check() {
+        // White is in check (Qe2+): standing pat (-400) is illegal and no
+        // quiet evasion saves material, but Kxe2 wins the queen.
+        let b = parse("4k3/8/8/8/8/8/4q3/4K2R w - - 0 1");
+        assert_eq!(evaluate(&b), -400, "stand-pat down Q-vs-R");
+        let (mv, score) = search_best(&b, 1).expect("must have a move");
+        assert_eq!((mv.from(), mv.to()), (4, 12), "only Kxe2 refutes");
+        assert_eq!(score, 500, "up the exchange after Kxe2");
+    }
+
     #[test]
     fn mate_fools_qh4_from_legal_play() {
         // 1.f3 e5 2.g4 played through the real game layer: legal play only.
