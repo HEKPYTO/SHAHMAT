@@ -8,6 +8,7 @@ No python, no jq, no frameworks.
 | `bench.sh [image]` | Builds the image, times startpos d6 / kiwi d5 / pos4 d5 in-image (warmup + median of 5, nodes-gated), writes `outputs/bench-<utc-ts>.json` + table on stdout | Measuring speed |
 | `gate.sh [binary]` | Checks 15 exact perft counts + 2 `--no-bulk` cross-checks + divide-row self-consistency against any `shahmat-svc` binary (default `./target/release/shahmat-svc`), exit 0/1 | Proving correctness |
 | `searchbench.sh [--gate] [binary]` | Search-representative matrix (8 entries, mid/endgame heavy) across bulk / tt16 / nobulk modes, every cell node gated, default times warmup plus median of 5 into `outputs/searchbench-<utc-ts>.json` | Timing search-like mix |
+| `searchbench-v2.sh [--gate] [binary]` | Same gated 8x3 matrix (same `--gate` semantics, JSON into `outputs/searchbench-v2-<utc-ts>.json`) plus the frozen search-path score: nobulk kiwi-d5+p6-d5+p5-d5 medians (~91% of nobulk time) with its share, and the tt16 top-3. Still perft-driven — TT cells do not port to real search | Scoring the search path, not tuning it |
 
 ## Porting to another project
 
