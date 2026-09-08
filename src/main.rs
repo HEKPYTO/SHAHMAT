@@ -1,6 +1,7 @@
 use shahmat::fen::{parse, STARTPOS};
 use shahmat::movegen::{generate_legal, make, MoveList};
-use shahmat::perft::{divide, perft, perft_bulk, perft_tt, Tt, MAX_DEPTH};
+use shahmat::perft::{divide, move_text, perft, perft_bulk, perft_tt, Tt, MAX_DEPTH};
+use shahmat::search::{search_iterative, SearchTt};
 use shahmat::{Board, Move};
 use std::env;
 use std::process::ExitCode;
@@ -11,9 +12,78 @@ const PARALLEL_MIN_DEPTH: u32 = 4;
 
 fn usage() -> ExitCode {
     eprintln!(
-        "usage: shahmat-svc --health-check | perft <startpos <depth> | <fen...> <depth>> [--no-bulk] [--divide] [--tt <MB>] [--jobs N]"
+        "usage: shahmat-svc --health-check | perft <startpos <depth> | <fen...> <depth>> [--no-bulk] [--divide] [--tt <MB>] [--jobs N] | search <startpos <depth> | <fen...> <depth>> [--tt <MB>]"
     );
     ExitCode::from(2)
+}
+
+/// Iterative-deepening search: per-depth `score`/`move`/`nodes` rows plus a
+/// `best` summary (move text, score, cumulative nodes, wall time, TT
+/// counters). Deterministic for a fixed binary: no clock, no time-based
+/// decisions.
+fn search_cmd(rest: &[String]) -> ExitCode {
+    let mut tt_mb: usize = 16;
+    let mut positional: Vec<String> = Vec::new();
+    let mut i = 0;
+    while i < rest.len() {
+        match rest[i].as_str() {
+            "--tt" => {
+                i += 1;
+                match rest.get(i).and_then(|s| s.parse().ok()) {
+                    Some(mb) if (1..=1024).contains(&mb) => tt_mb = mb,
+                    _ => return usage(),
+                }
+            }
+            _ => positional.push(rest[i].clone()),
+        }
+        i += 1;
+    }
+    let (fen, depth_src) = match positional.len() {
+        1 => (STARTPOS.to_string(), positional[0].clone()),
+        2 if positional[0] == "startpos" => (STARTPOS.to_string(), positional[1].clone()),
+        2 => (positional[0].clone(), positional[1].clone()),
+        7 => (positional[..6].join(" "), positional[6].clone()),
+        _ => return usage(),
+    };
+    let depth: u32 = match depth_src.parse() {
+        Ok(d) if d <= MAX_DEPTH => d,
+        _ => {
+            eprintln!("depth must be 0..={MAX_DEPTH}");
+            return usage();
+        }
+    };
+    let board = match parse(&fen) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("bad FEN: {e}");
+            return ExitCode::from(2);
+        }
+    };
+    let mut tt = SearchTt::new(tt_mb);
+    let t = Instant::now();
+    let rows = search_iterative(&board, depth, Some(&mut tt));
+    let dt = t.elapsed().as_secs_f64();
+    for r in &rows {
+        let mv = r.best.map_or("-".to_string(), move_text);
+        println!(
+            "depth: {} score: {} move: {} nodes: {}",
+            r.depth, r.score, mv, r.nodes
+        );
+    }
+    match rows.last() {
+        Some(r) => {
+            let mv = r.best.map_or("-".to_string(), move_text);
+            println!(
+                "best: {mv} score: {} nodes: {} time: {dt:.3}s tt: {} probes, {} usable",
+                r.score,
+                r.nodes,
+                tt.probes(),
+                tt.usables
+            );
+        }
+        None => println!("best: - score: 0 nodes: 0 time: {dt:.3}s"),
+    }
+    ExitCode::SUCCESS
 }
 
 #[derive(Clone, Copy)]
@@ -30,6 +100,9 @@ fn main() -> ExitCode {
         return ExitCode::from(0);
     }
     let mut rest = args.as_slice();
+    if rest.first().is_some_and(|a| a == "search") {
+        return search_cmd(&rest[1..]);
+    }
     if rest.first().is_some_and(|a| a == "perft") {
         rest = &rest[1..];
     } else {

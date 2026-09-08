@@ -1,151 +1,16 @@
-//! Minimal alpha-beta search prototype (fixed-depth, MVV-LVA ordering).
-//!
-//! New-file-only prototype over the frozen movegen core: negamax with
-//! alpha-beta pruning, MVV-LVA capture ordering, and exact mate/stalemate
-//! terminals derived from legal play (`generate_legal` empty + `is_in_check`).
-//! No quiescence, no transposition table, no timing, no heap on the hot path
-//! (stack `MoveList` only). Movegen/perft are untouched.
+//! Search-prototype acceptance suite, driving the lib implementation in
+//! `shahmat::search`: eval sanity, MVV-LVA ranking, deterministic roots,
+//! and four mates (one reached through legal [`Game`] play).
 
 use shahmat::board::{Board, Move};
 use shahmat::fen;
 use shahmat::movegen::{generate_legal, has_legal, is_in_check, make, unmake, MoveList};
+use shahmat::search::{evaluate, move_score, order_moves, search_best, MATE};
 
-/// Mate-score anchor; one ply subtracted per move so faster mates win.
-pub const MATE: i32 = 100_000;
-const INF: i32 = 1_000_000;
-
-/// Centipawn values by piece index (P N B R Q K; king has no trade value).
-const VAL: [i32; 6] = [100, 320, 330, 500, 900, 0];
-
+/// Side-to-move probe (test helper; engine copy lives in `shahmat::search`).
 #[inline]
 fn stm_white(b: &Board) -> bool {
     b.state[0] & 1 == 0
-}
-
-/// Static material eval in centipawns from the side-to-move's view.
-pub fn evaluate(b: &Board) -> i32 {
-    let white_bb = b.occupancies[6];
-    let black_bb = b.occupancies[7];
-    let mut white = 0i32;
-    let mut black = 0i32;
-    for (p, bb) in b.occupancies[..6].iter().enumerate() {
-        white += (bb & white_bb).count_ones() as i32 * VAL[p];
-        black += (bb & black_bb).count_ones() as i32 * VAL[p];
-    }
-    let diff = white - black;
-    if stm_white(b) {
-        diff
-    } else {
-        -diff
-    }
-}
-
-/// Piece index occupying `sq`, if any (victim probe, pawn-first in use).
-fn piece_on(b: &Board, sq: u8) -> Option<usize> {
-    let bit = 1u64 << sq;
-    (0..6).find(|&p| b.occupancies[p] & bit != 0)
-}
-
-/// MVV-LVA ordering key (highest first): most valuable victim, least
-/// valuable attacker; promotion bonus by placed-piece value. Quiet moves
-/// score 0. En passant (diagonal pawn move to an empty square) counts as a
-/// pawn capture.
-pub fn move_score(b: &Board, mv: Move) -> i32 {
-    let attacker = VAL[mv.mover() as usize];
-    let mut s = 0;
-    match piece_on(b, mv.to()) {
-        Some(victim) => s += 10 * VAL[victim] - attacker,
-        None => {
-            if mv.mover() == 0 && (mv.from() & 7) != (mv.to() & 7) {
-                s += 10 * VAL[0] - attacker;
-            }
-        }
-    }
-    if mv.is_promotion() {
-        s += VAL[mv.promo() as usize];
-    }
-    s
-}
-
-/// In-place descending sort by MVV-LVA key (insertion sort; lists are tiny).
-fn order_moves(b: &Board, list: &mut MoveList) {
-    for i in 1..list.len {
-        let mv = list.moves[i];
-        let key = move_score(b, mv);
-        let mut j = i;
-        while j > 0 && move_score(b, list.moves[j - 1]) < key {
-            list.moves[j] = list.moves[j - 1];
-            j -= 1;
-        }
-        list.moves[j] = mv;
-    }
-}
-
-/// Negamax with alpha-beta over a fixed depth. Terminals are exact: no legal
-/// moves means mate (`-MATE + ply`, so faster mates score higher) or
-/// stalemate (0). Checked before the depth cutoff so mate-in-1 is visible at
-/// any depth >= 1 ply of lookahead.
-fn negamax(b: &mut Board, depth: u32, mut alpha: i32, beta: i32, ply: i32) -> i32 {
-    let white = stm_white(b);
-    let mut list = MoveList::new();
-    generate_legal(b, &mut list);
-    if list.len == 0 {
-        return if is_in_check(b, white) {
-            -MATE + ply
-        } else {
-            0
-        };
-    }
-    if depth == 0 {
-        return evaluate(b);
-    }
-    order_moves(b, &mut list);
-    let mut best = -INF;
-    for i in 0..list.len {
-        let mv = list.moves[i];
-        let undo = make(b, mv);
-        let s = -negamax(b, depth - 1, -beta, -alpha, ply + 1);
-        unmake(b, undo, mv);
-        if s > best {
-            best = s;
-        }
-        if s > alpha {
-            alpha = s;
-        }
-        if alpha >= beta {
-            break;
-        }
-    }
-    best
-}
-
-/// Fixed-depth root search: best move and its side-to-move-perspective score,
-/// or `None` when the side to move has no legal move.
-pub fn search_best(board: &Board, depth: u32) -> Option<(Move, i32)> {
-    let mut b = *board;
-    let mut list = MoveList::new();
-    generate_legal(&mut b, &mut list);
-    if list.len == 0 {
-        return None;
-    }
-    order_moves(&b, &mut list);
-    let mut best_mv = list.moves[0];
-    let mut best = -INF;
-    let (mut alpha, beta) = (-INF, INF);
-    for i in 0..list.len {
-        let mv = list.moves[i];
-        let undo = make(&mut b, mv);
-        let s = -negamax(&mut b, depth.saturating_sub(1), -beta, -alpha, 1);
-        unmake(&mut b, undo, mv);
-        if s > best {
-            best = s;
-            best_mv = mv;
-        }
-        if s > alpha {
-            alpha = s;
-        }
-    }
-    Some((best_mv, best))
 }
 
 #[cfg(test)]

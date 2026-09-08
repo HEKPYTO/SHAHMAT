@@ -9,6 +9,7 @@ No python, no jq, no frameworks.
 | `gate.sh [binary]` | Checks 15 exact perft counts + 2 `--no-bulk` cross-checks + divide-row self-consistency against any `shahmat-svc` binary (default `./target/release/shahmat-svc`), exit 0/1 | Proving correctness |
 | `searchbench.sh [--gate] [binary]` | Search-representative matrix (8 entries, mid/endgame heavy) across bulk / tt16 / nobulk modes, every cell node gated, default times warmup plus median of 5 into `outputs/searchbench-<utc-ts>.json` | Timing search-like mix |
 | `searchbench-v2.sh [--gate] [binary]` | Same gated 8x3 matrix (same `--gate` semantics, JSON into `outputs/searchbench-v2-<utc-ts>.json`) plus the frozen search-path score: nobulk kiwi-d5+p6-d5+p5-d5 medians (~91% of nobulk time) with its share, and the tt16 top-3. Still perft-driven — TT cells do not port to real search | Scoring the search path, not tuning it |
+| `searchbench-search.sh [--gate] [binary]` | Frozen fixed-depth search matrix (4 positions + 4 mates, tt16): mates must return exact best move with mate-range score, every cell bit-identical across two runs (deterministic search), default times warmup plus median of 5 into `outputs/searchbench-search-<utc-ts>.json` | Gating the search substrate |
 
 ## Porting to another project
 
