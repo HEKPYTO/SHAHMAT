@@ -96,37 +96,89 @@ const KING_MG: [i16; 64] = [
 const PST_MG: [[i16; 64]; 6] = [PAWN_MG, KNIGHT_MG, BISHOP_MG, ROOK_MG, QUEEN_MG, KING_MG];
 const _: () = assert!(core::mem::size_of::<[[i16; 64]; 6]>() == 768);
 
+/*
+ * Endgame piece-square tables (EG half of the tapered eval, K14). Same
+ * layout as the MG half: rows run rank 1 first, white reads `table[sq]`
+ * straight and black reads the vertical mirror `table[sq ^ 56]`.
+ *
+ * Values: for P/N/B/R/Q the EG half reuses the MG values — in the
+ * Simplified Evaluation Function family the non-king placement values
+ * carry over to the endgame (only the king's role flips). The king EG
+ * half is the classic centralized-king companion to Michniewski's MG
+ * corner-seeking king (same public-domain source family): it rewards a
+ * centralised own king and, by subtraction, drives the enemy king to the
+ * rim — the KPK/KQvK conversion gradient.
+ */
+const PAWN_EG: [i16; 64] = PAWN_MG;
+const KNIGHT_EG: [i16; 64] = KNIGHT_MG;
+const BISHOP_EG: [i16; 64] = BISHOP_MG;
+const ROOK_EG: [i16; 64] = ROOK_MG;
+const QUEEN_EG: [i16; 64] = QUEEN_MG;
+const KING_EG: [i16; 64] = [
+    -50, -40, -30, -20, -20, -30, -40, -50, -30, -20, -10, 0, 0, -10, -20, -30, -30, -10, 20, 30,
+    30, 20, -10, -30, -30, -10, 30, 40, 40, 30, -10, -30, -30, -10, 30, 40, 40, 30, -10, -30, -30,
+    -10, 20, 30, 30, 20, -10, -30, -30, -30, 0, 0, 0, 0, -30, -30, -50, -30, -30, -30, -30, -30,
+    -30, -50,
+];
+/// Endgame tables by piece index (P N B R Q K), 6 x 64 `i16` = 768 B.
+const PST_EG: [[i16; 64]; 6] = [PAWN_EG, KNIGHT_EG, BISHOP_EG, ROOK_EG, QUEEN_EG, KING_EG];
+const _: () = assert!(core::mem::size_of::<[[i16; 64]; 6]>() == 768);
+
+/// Game-phase weights by piece index (P N B R Q K): pawns and kings do not
+/// count, `phase = min(24, N + B + 2R + 4Q)` over both colours. 24 is the
+/// full-material total (4N + 4B + 8R + 8Q at the start position).
+const PHASE_W: [i32; 6] = [0, 1, 1, 2, 4, 0];
+/// Full-material phase: at 24 the blend is pure middlegame.
+const PHASE_FULL: i32 = 24;
+
 #[inline]
 fn stm_white(b: &Board) -> bool {
     b.state[0] & 1 == 0
 }
 
-/// Static material + middlegame piece-square eval, in centipawns from the
-/// side-to-move's view. One bitboard walk per piece type (`tzcnt` +
-/// table lookup, no allocation): white adds `VAL + PST_MG[sq]`, black
-/// subtracts `VAL + PST_MG[sq ^ 56]` (vertical mirror).
+/// Static tapered eval, in centipawns from the side-to-move's view. One
+/// bitboard walk per piece type (`tzcnt` + two table lookups, no
+/// allocation): white adds `VAL + PST_MG[sq]` to the middlegame total and
+/// `VAL + PST_EG[sq]` to the endgame total, black subtracts the same via
+/// the vertical mirror `sq ^ 56`. The game phase folds into the same loop
+/// (`phase = min(24, N + B + 2R + 4Q)` over both colours) and the blended
+/// score is `(mg * phase + eg * (24 - phase)) / 24`, so full material is
+/// bit-identical to the old pure-middlegame eval and bare-king positions
+/// are pure endgame. STM relativity is exact: the white-relative blend is
+/// negated for black to move, and the colour-flip mirror test still holds
+/// because the phase count is colour-symmetric.
 pub fn evaluate(b: &Board) -> i32 {
     let white_bb = b.occupancies[6];
     let black_bb = b.occupancies[7];
-    let mut white = 0i32;
-    let mut black = 0i32;
+    let mut white_mg = 0i32;
+    let mut white_eg = 0i32;
+    let mut black_mg = 0i32;
+    let mut black_eg = 0i32;
+    let mut phase_sum = 0i32;
     for (p, bb) in b.occupancies[..6].iter().enumerate() {
-        let table = &PST_MG[p];
+        let mg = &PST_MG[p];
+        let eg = &PST_EG[p];
         let value = VAL[p];
+        phase_sum += PHASE_W[p] * bb.count_ones() as i32;
         let mut w = *bb & white_bb;
         while w != 0 {
             let sq = w.trailing_zeros() as usize;
             w &= w - 1;
-            white += value + i32::from(table[sq]);
+            white_mg += value + i32::from(mg[sq]);
+            white_eg += value + i32::from(eg[sq]);
         }
         let mut bl = *bb & black_bb;
         while bl != 0 {
             let sq = bl.trailing_zeros() as usize;
             bl &= bl - 1;
-            black += value + i32::from(table[sq ^ 56]);
+            black_mg += value + i32::from(mg[sq ^ 56]);
+            black_eg += value + i32::from(eg[sq ^ 56]);
         }
     }
-    let diff = white - black;
+    let phase = phase_sum.min(PHASE_FULL);
+    let mg = white_mg - black_mg;
+    let eg = white_eg - black_eg;
+    let diff = (mg * phase + eg * (PHASE_FULL - phase)) / PHASE_FULL;
     if stm_white(b) {
         diff
     } else {

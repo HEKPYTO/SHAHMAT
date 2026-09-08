@@ -308,8 +308,9 @@ mod suite {
         let b = parse("4k3/8/4q3/3p4/8/8/Q7/4K3 w - - 0 1");
         let (_, score) = search_best(&b, 1).expect("must have a move");
         // Down a pawn (-100 material) plus the square delta of the best
-        // reply; PST-aware total is -125.
-        assert_eq!(score, -125, "down a pawn with the trap refuted");
+        // reply; tapered total is -121 (phase 8: mostly endgame, where the
+        // e1/a2 kings score KING_EG instead of KING_MG).
+        assert_eq!(score, -121, "down a pawn with the trap refuted");
     }
 
     #[test]
@@ -320,7 +321,9 @@ mod suite {
         assert_eq!(evaluate(&b), -400, "stand-pat down Q-vs-R");
         let (mv, score) = search_best(&b, 1).expect("must have a move");
         assert_eq!((mv.from(), mv.to()), (4, 12), "only Kxe2 refutes");
-        assert_eq!(score, 500, "up the exchange after Kxe2");
+        // Tapered: phase 2 after the capture, (500 * 2 + 520 * 22) / 24.
+        // The 520 endgame side comes from KING_EG (Ke2 0, Ke8 -20).
+        assert_eq!(score, 518, "up the exchange after Kxe2");
     }
 
     /// K7 staged generation keeps exact scores on the predicate-edge
@@ -357,6 +360,79 @@ mod suite {
                 .expect("cutoffs observed at {fen_str}");
             assert!((0.0..=1.0).contains(&f), "fraction in range at {fen_str}");
         }
+    }
+
+    /// K14 tapered blend: bare kings are pure endgame (phase 0), so the
+    /// centralised KING_EG half shows directly. Ke4 vs Ka8 scores +90 for
+    /// White (40 own, -50 enemy mirrored) and negates exactly with the turn;
+    /// corner-vs-corner is 0, so king activity has a real gradient.
+    #[test]
+    fn k14_bare_kings_pure_eg_king_activity() {
+        let center = parse("k7/8/8/8/4K3/8/8/8 w - - 0 1");
+        assert_eq!(evaluate(&center), 90, "centralised king + rimmed enemy");
+        let center_b = parse("k7/8/8/8/4K3/8/8/8 b - - 0 1");
+        assert_eq!(
+            evaluate(&center_b),
+            -90,
+            "STM relativity must be exact through the blend"
+        );
+        let corner = parse("k7/8/8/8/8/8/8/K7 w - - 0 1");
+        assert_eq!(evaluate(&corner), 0, "corner-vs-corner is level");
+        assert!(
+            evaluate(&center) > evaluate(&corner),
+            "activity gradient: center beats corner"
+        );
+    }
+
+    /// K14 KPK: the pawn scores and approaching with the king improves the
+    /// eval (Ke1+g2 = 110, Ke4+g2 = 170), the winning-plan direction.
+    #[test]
+    fn k14_kpk_support_and_approach() {
+        let back = parse("4k3/8/8/8/8/8/5P2/4K3 w - - 0 1");
+        assert_eq!(evaluate(&back), 110, "KPK back-rank king");
+        let active = parse("4k3/8/8/8/4K3/8/5P2/8 w - - 0 1");
+        assert_eq!(evaluate(&active), 170, "KPK approaching king");
+        assert!(
+            evaluate(&active) > evaluate(&back),
+            "king approach must improve KPK eval"
+        );
+        assert!(
+            evaluate(&back) > 0,
+            "extra passed pawn must score for the side to move"
+        );
+    }
+
+    /// K14 KQvK conversion gradient: with the enemy king rimmed (h8) White
+    /// scores 923, with it centralised (d8) only 901 — both above the 900
+    /// material line, so the eval pulls toward the mating corner.
+    #[test]
+    fn k14_kqk_enemy_rim_gradient() {
+        let rim = parse("7k/5Q2/6K1/8/8/8/8/8 w - - 0 1");
+        let center = parse("3k4/5Q2/6K1/8/8/8/8/8 w - - 0 1");
+        assert_eq!(evaluate(&rim), 923, "KQvK enemy on the rim");
+        assert_eq!(evaluate(&center), 901, "KQvK enemy centralised");
+        assert!(
+            evaluate(&rim) > evaluate(&center),
+            "conversion gradient must favour the rim"
+        );
+        assert!(
+            evaluate(&center) > 900,
+            "KQvK must stay above bare material"
+        );
+    }
+
+    /// K14 phase cap: 7 queens weigh 28, clamped to 24, so the position is
+    /// pure middlegame: 6300 material - 85 queen squares - 40 Ke4 = 6175
+    /// (an uncapped blend would give 6158). Startpos plus an extra queen is
+    /// likewise pure MG at 905 and negates exactly.
+    #[test]
+    fn k14_phase_cap_is_pure_mg() {
+        let many = parse("4k3/8/8/8/4K3/8/8/QQQQ1QQQ w - - 0 1");
+        assert_eq!(evaluate(&many), 6175, "over-full phase clamps to MG");
+        let extra = parse("rnbqkbnr/pppppppp/8/8/3Q4/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
+        assert_eq!(evaluate(&extra), 905, "startpos + Qd4 is pure MG");
+        let extra_b = parse("rnbqkbnr/pppppppp/8/8/3Q4/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1");
+        assert_eq!(evaluate(&extra_b), -905, "STM relativity at full phase");
     }
 
     #[test]
