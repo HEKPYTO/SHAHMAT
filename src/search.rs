@@ -50,20 +50,81 @@ const FLAG_UPPER: u8 = 2;
 /// Centipawn values by piece index (P N B R Q K; king has no trade value).
 const VAL: [i32; 6] = [100, 320, 330, 500, 900, 0];
 
+/*
+ * Middlegame piece-square tables (MG half of a tapered eval, from day one:
+ * every table is named `*_MG` so a future `*_EG` half slots in beside it).
+ *
+ * Values: Tomasz Michniewski's Simplified Evaluation Function, released to
+ * the public domain
+ * ([chessprogramming.org](https://www.chessprogramming.org/Simplified_Evaluation_Function)).
+ * Rows below run rank 1 first (square `sq = file + 8 * rank`, a1 = 0), i.e.
+ * the source's rank-8-first rows reversed; white reads `table[sq]` straight
+ * and black reads the vertical mirror `table[sq ^ 56]`.
+ */
+const PAWN_MG: [i16; 64] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 5, 10, 10, -20, -20, 10, 10, 5, 5, -5, -10, 0, 0, -10, -5, 5, 0, 0, 0,
+    20, 20, 0, 0, 0, 5, 5, 10, 25, 25, 10, 5, 5, 10, 10, 20, 30, 30, 20, 10, 10, 50, 50, 50, 50,
+    50, 50, 50, 50, 0, 0, 0, 0, 0, 0, 0, 0,
+];
+const KNIGHT_MG: [i16; 64] = [
+    -50, -40, -30, -30, -30, -30, -40, -50, -40, -20, 0, 5, 5, 0, -20, -40, -30, 5, 10, 15, 15, 10,
+    5, -30, -30, 0, 15, 20, 20, 15, 0, -30, -30, 5, 15, 20, 20, 15, 5, -30, -30, 0, 10, 15, 15, 10,
+    0, -30, -40, -20, 0, 0, 0, 0, -20, -40, -50, -40, -30, -30, -30, -30, -40, -50,
+];
+const BISHOP_MG: [i16; 64] = [
+    -20, -10, -10, -10, -10, -10, -10, -20, -10, 5, 0, 0, 0, 0, 5, -10, -10, 10, 10, 10, 10, 10,
+    10, -10, -10, 0, 10, 10, 10, 10, 0, -10, -10, 5, 5, 10, 10, 5, 5, -10, -10, 0, 5, 10, 10, 5, 0,
+    -10, -10, 0, 0, 0, 0, 0, 0, -10, -20, -10, -10, -10, -10, -10, -10, -20,
+];
+const ROOK_MG: [i16; 64] = [
+    0, 0, 0, 5, 5, 0, 0, 0, -5, 0, 0, 0, 0, 0, 0, -5, -5, 0, 0, 0, 0, 0, 0, -5, -5, 0, 0, 0, 0, 0,
+    0, -5, -5, 0, 0, 0, 0, 0, 0, -5, -5, 0, 0, 0, 0, 0, 0, -5, 5, 10, 10, 10, 10, 10, 10, 5, 0, 0,
+    0, 0, 0, 0, 0, 0,
+];
+const QUEEN_MG: [i16; 64] = [
+    -20, -10, -10, -5, -5, -10, -10, -20, -10, 0, 5, 0, 0, 0, 0, -10, -10, 5, 5, 5, 5, 5, 0, -10,
+    0, 0, 5, 5, 5, 5, 0, -5, -5, 0, 5, 5, 5, 5, 0, -5, -10, 0, 5, 5, 5, 5, 0, -10, -10, 0, 0, 0, 0,
+    0, 0, -10, -20, -10, -10, -5, -5, -10, -10, -20,
+];
+const KING_MG: [i16; 64] = [
+    20, 30, 10, 0, 0, 10, 30, 20, 20, 20, 0, 0, 0, 0, 20, 20, -10, -20, -20, -20, -20, -20, -20,
+    -10, -20, -30, -30, -40, -40, -30, -30, -20, -30, -40, -40, -50, -50, -40, -40, -30, -30, -40,
+    -40, -50, -50, -40, -40, -30, -30, -40, -40, -50, -50, -40, -40, -30, -30, -40, -40, -50, -50,
+    -40, -40, -30,
+];
+/// Piece-square tables by piece index (P N B R Q K), 6 x 64 `i16` = 768 B.
+const PST_MG: [[i16; 64]; 6] = [PAWN_MG, KNIGHT_MG, BISHOP_MG, ROOK_MG, QUEEN_MG, KING_MG];
+const _: () = assert!(core::mem::size_of::<[[i16; 64]; 6]>() == 768);
+
 #[inline]
 fn stm_white(b: &Board) -> bool {
     b.state[0] & 1 == 0
 }
 
-/// Static material eval in centipawns from the side-to-move's view.
+/// Static material + middlegame piece-square eval, in centipawns from the
+/// side-to-move's view. One bitboard walk per piece type (`tzcnt` +
+/// table lookup, no allocation): white adds `VAL + PST_MG[sq]`, black
+/// subtracts `VAL + PST_MG[sq ^ 56]` (vertical mirror).
 pub fn evaluate(b: &Board) -> i32 {
     let white_bb = b.occupancies[6];
     let black_bb = b.occupancies[7];
     let mut white = 0i32;
     let mut black = 0i32;
     for (p, bb) in b.occupancies[..6].iter().enumerate() {
-        white += (bb & white_bb).count_ones() as i32 * VAL[p];
-        black += (bb & black_bb).count_ones() as i32 * VAL[p];
+        let table = &PST_MG[p];
+        let value = VAL[p];
+        let mut w = *bb & white_bb;
+        while w != 0 {
+            let sq = w.trailing_zeros() as usize;
+            w &= w - 1;
+            white += value + i32::from(table[sq]);
+        }
+        let mut bl = *bb & black_bb;
+        while bl != 0 {
+            let sq = bl.trailing_zeros() as usize;
+            bl &= bl - 1;
+            black += value + i32::from(table[sq ^ 56]);
+        }
     }
     let diff = white - black;
     if stm_white(b) {

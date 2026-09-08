@@ -50,10 +50,99 @@ mod suite {
     #[test]
     fn eval_startpos_zero_and_queen_up() {
         assert_eq!(evaluate(&parse(fen::STARTPOS)), 0);
+        // Extra queen on d1 scores 900 material - 5 square (QUEEN_MG[d1]).
         let up_w = parse("rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1");
-        assert_eq!(evaluate(&up_w), 900);
+        assert_eq!(evaluate(&up_w), 895);
         let up_b = parse("rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR b KQkq - 0 1");
-        assert_eq!(evaluate(&up_b), -900);
+        assert_eq!(evaluate(&up_b), -895);
+    }
+
+    /// Mirror a FEN vertically and swap colours: reverse the rank rows,
+    /// swap piece case (and castling case), mirror the en-passant rank,
+    /// and keep the turn. The twin hands every army to the other side,
+    /// so an STM-relative eval must negate: eval(w) == -eval(flipped).
+    fn flipped_fen(fen_str: &str) -> String {
+        let parts: Vec<&str> = fen_str.split(' ').collect();
+        assert!(parts.len() >= 2, "FEN needs placement + turn");
+        let mut ranks: Vec<String> = parts[0]
+            .split('/')
+            .map(|r| {
+                r.chars()
+                    .map(|c| {
+                        if c.is_ascii_alphabetic() {
+                            if c.is_ascii_uppercase() {
+                                c.to_ascii_lowercase()
+                            } else {
+                                c.to_ascii_uppercase()
+                            }
+                        } else {
+                            c
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        ranks.reverse();
+        let mut out = vec![ranks.join("/"), parts[1].to_string()];
+        if parts.len() > 2 {
+            let castle: String = parts[2]
+                .chars()
+                .map(|c| {
+                    if c.is_ascii_alphabetic() {
+                        if c.is_ascii_uppercase() {
+                            c.to_ascii_lowercase()
+                        } else {
+                            c.to_ascii_uppercase()
+                        }
+                    } else {
+                        c
+                    }
+                })
+                .collect();
+            out.push(castle);
+        }
+        if parts.len() > 3 {
+            let ep = parts[3];
+            if ep == "-" {
+                out.push("-".to_string());
+            } else {
+                let bytes = ep.as_bytes();
+                let rank = match bytes[1] as char {
+                    '3' => '6',
+                    '6' => '3',
+                    r => r,
+                };
+                out.push(format!("{}{}", bytes[0] as char, rank));
+            }
+        }
+        for p in parts.iter().skip(4) {
+            out.push(p.to_string());
+        }
+        out.join(" ")
+    }
+
+    /// Piece-square symmetry gate: eval(pos) == -eval(colour-flipped twin).
+    /// Black reads each table mirrored (sq ^ 56), so any asymmetric PST
+    /// wiring or one-sided material count fails here.
+    #[test]
+    fn pst_mirror_symmetry() {
+        let fens = [
+            fen::STARTPOS,
+            "rnb1kbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1",
+            "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1",
+            "4k3/8/4p3/3r4/8/8/8/3QK3 w - - 0 1",
+            "4k3/8/8/8/3N4/8/PPPPPPPP/RNBQKB1R w KQ - 0 1",
+            "r1bqk2r/pppp1ppp/2n2n2/2b1p3/2B1P3/5N2/PPPP1PPP/RNBQK2R w KQkq - 4 4",
+        ];
+        for fen_str in fens {
+            let b = parse(fen_str);
+            let twin = parse(&flipped_fen(fen_str));
+            assert_eq!(
+                evaluate(&b),
+                -evaluate(&twin),
+                "mirror symmetry must hold for {fen_str}"
+            );
+        }
     }
 
     #[test]
@@ -200,12 +289,13 @@ mod suite {
 
     #[test]
     fn qs_dodges_queen_takes_defended_rook() {
-        // 1.Qxd5 statically wins a rook (+800) but e6xd5 recaptures
-        // the queen: quiescence must not play it at depth 1.
-        assert_trap_avoided("4k3/8/4p3/3r4/8/8/8/3QK3 w - - 0 1", 3, 35, 800);
+        // 1.Qxd5 statically wins a rook (+800 material, +5 square:
+        // QUEEN_MG[d5] - QUEEN_MG[d1]) but e6xd5 recaptures the queen:
+        // quiescence must not play it at depth 1.
+        assert_trap_avoided("4k3/8/4p3/3r4/8/8/8/3QK3 w - - 0 1", 3, 35, 805);
         let b = parse("4k3/8/4p3/3r4/8/8/8/3QK3 w - - 0 1");
         let (_, score) = search_best(&b, 1).expect("must have a move");
-        assert_eq!(score, 300, "up Q-vs-R+P with the trap refuted");
+        assert_eq!(score, 305, "up Q-vs-R+P with the trap refuted");
     }
 
     #[test]
@@ -217,7 +307,9 @@ mod suite {
         assert_trap_avoided("4k3/8/4q3/3p4/8/8/Q7/4K3 w - - 0 1", 8, 35, 0);
         let b = parse("4k3/8/4q3/3p4/8/8/Q7/4K3 w - - 0 1");
         let (_, score) = search_best(&b, 1).expect("must have a move");
-        assert_eq!(score, -100, "down a pawn with the trap refuted");
+        // Down a pawn (-100 material) plus the square delta of the best
+        // reply; PST-aware total is -125.
+        assert_eq!(score, -125, "down a pawn with the trap refuted");
     }
 
     #[test]
