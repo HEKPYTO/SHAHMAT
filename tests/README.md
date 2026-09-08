@@ -6,7 +6,7 @@ Integration tests (run against the built library crate).
 | --- | --- | --- |
 | `tt_hash.rs` | Hash + transposition table: same position hashes identically across parses/runs (golden startpos key), one move avalanches the key, make/unmake round-trips restore board + key, TT-on totals equal TT-off, repeated perft d4 hits, 16 MiB timing note | `cargo test --locked -p shahmat --test tt_hash` |
 | `zero_alloc.rs` | Zero heap via counting `GlobalAlloc`: board construction, successful FEN parse, movegen, bulk perft d3, full perft d2 allocate nothing steady-state (warmed up; attack-table one-time init allocates; thread-local flag, mutex-serialised) | `cargo test --locked -p shahmat --test zero_alloc` |
-| `search_proto.rs` | Minimal alpha-beta prototype over frozen movegen (negamax, MVV-LVA order, exact mate/stalemate terminals; 4 mates incl. legal-play Fool's, deterministic legal root). New-file-only, no `src/` changes — beachhead for search work, not a speed change | `cargo test --locked -p shahmat --test search_proto` |
+| `search_proto.rs` | Lib search acceptance over `shahmat::search`: eval sanity (material, PST mirror symmetry, taper phase), SEE capture ranking (winning-first, deep-loss demote/floor, sac-mate still found, castle/EP/promo tiers), deterministic roots, QS traps and evasion, staged-partition coverage, 4 mates incl. legal-play Fool's | `cargo test --locked -p shahmat --test search_proto` |
 
 Out of scope by contract: `render`/`divide` (allocate by signature) and
 FEN failure strings (failure path only).

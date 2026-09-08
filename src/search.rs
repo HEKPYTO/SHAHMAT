@@ -33,6 +33,12 @@
 //! The quiescence horizon never touches the table (no probe, no store):
 //! TT plumb-through stays in `negamax`/root only, so cached bounds keep
 //! their exact-depth meaning.
+//!
+//! Known limits (deliberate, not oversights): the table is position-only —
+//! no repetition, fifty-move, or cycle handling, so callers own game history
+//! and cyclic-graph aliasing is out of scope; SEE never prunes, it only
+//! orders (K4 decision: fitted demotion thresholds stay out of cuts); bucket
+//! replacement is first-unused-else-shallowest, tuning is a later ticket.
 
 use crate::attacks::{bishop_attacks, rook_attacks};
 use crate::board::{board_hash, Board, Move};
