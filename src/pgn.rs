@@ -292,7 +292,9 @@ fn tokenize(game: usize, text: &str) -> Result<Vec<&str>, PgnError> {
     }
     let mut sans: Vec<&str> = Vec::new();
     for w in spans.iter().flat_map(|s| s.split_whitespace()) {
-        if w.starts_with('$') || w == "1-0" || w == "0-1" || w == "1/2-1/2" || w == "*" {
+        // NAGs (`$n`) standalone or suffixed (`e4$1`): cut at `$`, skip empties.
+        let w = w.split('$').next().unwrap_or("");
+        if w.is_empty() || w == "1-0" || w == "0-1" || w == "1/2-1/2" || w == "*" {
             continue;
         }
         if w.contains('(') || w.contains(')') {
@@ -540,6 +542,14 @@ mod tests {
             render(&b),
             "r1bqkb1r/pppp1Qpp/2n2n2/4p3/2B1P3/8/PPPP1PPP/RNB1K1NR b KQkq - 0 1"
         );
+    }
+
+    #[test]
+    fn pgn_suffixed_nags_skipped() {
+        let src = "[Event \"NAG\"]\n\n1. e4$1 e5$2 $16 *\n";
+        let games = load_pgn(src).expect("suffixed NAGs load");
+        assert_eq!(games.len(), 1);
+        assert_eq!(games[0].moves.len(), 2);
     }
 
     #[test]

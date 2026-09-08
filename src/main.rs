@@ -55,8 +55,10 @@ fn main() -> ExitCode {
             "--tt" => {
                 i += 1;
                 match rest.get(i).and_then(|s| s.parse().ok()) {
-                    Some(mb) => tt_mb = Some(mb),
-                    None => return usage(),
+                    // TT is a real upfront allocation: 0 panics on probe,
+                    // gigabytes abort. Bound it the way `--jobs` is bounded.
+                    Some(mb) if (1..=1024).contains(&mb) => tt_mb = Some(mb),
+                    _ => return usage(),
                 }
             }
             _ => positional.push(rest[i].clone()),
@@ -83,6 +85,12 @@ fn main() -> ExitCode {
             return usage();
         }
     };
+    // Depth 0 has no root moves: divide would print zero rows summing to
+    // `nodes: 0` while plain depth 0 prints `nodes: 1`. Reject, don't fib.
+    if show_divide && depth == 0 {
+        eprintln!("--divide needs depth >= 1 (depth 0 has no root moves)");
+        return usage();
+    }
     let board = match parse(&fen) {
         Ok(b) => b,
         Err(e) => {
@@ -217,35 +225,30 @@ fn count_prefix_chunk(
     debug_assert!(depth >= 2);
     let mut total = 0u64;
     let (mut probes, mut hits) = (0u64, 0u64);
-    match mode {
-        Mode::Bulk2 => {
-            for &(m1, m2) in chunk {
-                let mut child = *board;
-                make(&mut child, m1);
-                make(&mut child, m2);
-                total += perft_bulk(&child, depth - 2);
-            }
+    // Bulk2/Full differ only in the leaf counter: pick it once (Tt keeps
+    // its own table-plumbed loop below).
+    let plain: fn(&Board, u32) -> u64 = match mode {
+        Mode::Full => perft,
+        _ => perft_bulk,
+    };
+    if let Mode::Tt(mb) = mode {
+        // One table per worker chunk: keys are full-hash+depth, so
+        // sharing across the chunk's prefixes keeps totals exact.
+        let mut tt = Tt::new(mb);
+        for &(m1, m2) in chunk {
+            let mut child = *board;
+            make(&mut child, m1);
+            make(&mut child, m2);
+            total += perft_tt(&child, depth - 2, &mut tt);
         }
-        Mode::Full => {
-            for &(m1, m2) in chunk {
-                let mut child = *board;
-                make(&mut child, m1);
-                make(&mut child, m2);
-                total += perft(&child, depth - 2);
-            }
-        }
-        Mode::Tt(mb) => {
-            // One table per worker chunk: keys are full-hash+depth, so
-            // sharing across the chunk's prefixes keeps totals exact.
-            let mut tt = Tt::new(mb);
-            for &(m1, m2) in chunk {
-                let mut child = *board;
-                make(&mut child, m1);
-                make(&mut child, m2);
-                total += perft_tt(&child, depth - 2, &mut tt);
-            }
-            probes += tt.probes();
-            hits += tt.hits();
+        probes += tt.probes();
+        hits += tt.hits();
+    } else {
+        for &(m1, m2) in chunk {
+            let mut child = *board;
+            make(&mut child, m1);
+            make(&mut child, m2);
+            total += plain(&child, depth - 2);
         }
     }
     (total, probes, hits)

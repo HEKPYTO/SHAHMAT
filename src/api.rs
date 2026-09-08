@@ -67,7 +67,15 @@ impl fmt::Display for GameError {
     }
 }
 
-impl std::error::Error for GameError {}
+impl std::error::Error for GameError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            GameError::Fen(e) => Some(e),
+            GameError::Pgn(e) => Some(e),
+            _ => None,
+        }
+    }
+}
 
 impl From<crate::fen::FenError> for GameError {
     fn from(e: crate::fen::FenError) -> GameError {
@@ -154,7 +162,9 @@ fn piece_on(board: &Board, sq: u8) -> Option<usize> {
 
 /// Lowercase piece-type letter of a piece index.
 fn piece_letter(piece: usize) -> char {
-    b"pnbrqk"[piece] as char
+    // Total like perft's `move_text`: legal tokens index 0–5, but `Move.0`
+    // is pub so a crafted token must render, never panic.
+    *b"pnbrqk".get(piece).unwrap_or(&b'?') as char
 }
 
 /// True when `mv` captures on `board` (enemy-occupied dest, or a pawn
@@ -189,16 +199,7 @@ fn promo_code(ch: char) -> Option<u8> {
 impl Game {
     /// Startpos game with empty headers (FIDE adjudication on).
     pub fn new() -> Game {
-        let board = fen::parse(STARTPOS).expect("STARTPOS parses");
-        let hashes = vec![board_hash(&board)];
-        Game {
-            board,
-            history: Vec::new(),
-            hashes,
-            adjudicate: true,
-            headers: BTreeMap::new(),
-            initial_fen: STARTPOS.to_string(),
-        }
+        Self::from_fen(STARTPOS).expect("STARTPOS parses")
     }
 
     /// Bare mate/stalemate mode: draw adjudication off (perft-shaped purity;
@@ -687,8 +688,12 @@ impl Game {
     }
 
     /// Set a header (emitted by [`Game::to_pgn`], restored by [`Game::load_pgn`]).
+    /// Tag values cannot hold raw newlines (PGN tags are single-line), so
+    /// they become spaces here to keep the `to_pgn`/`load_pgn` round-trip.
+    /// Names stay caller-responsible: bad names fail loudly in `load_pgn`.
     pub fn set_header(&mut self, name: &str, value: &str) {
-        self.headers.insert(name.to_string(), value.to_string());
+        self.headers
+            .insert(name.to_string(), value.replace(['\n', '\r'], " "));
     }
 }
 
@@ -708,6 +713,17 @@ mod tests {
             g.push_san(m).unwrap();
         }
         g
+    }
+
+    #[test]
+    fn header_newline_sanitizes_and_round_trips() {
+        let mut g = Game::new();
+        g.set_header("Note", "a\nb\rc");
+        assert_eq!(g.get_header("Note"), Some("a b c"));
+        let text = g.to_pgn();
+        let mut back = Game::new();
+        back.load_pgn(&text).expect("own export loads");
+        assert_eq!(back.get_header("Note"), Some("a b c"));
     }
 
     #[test]

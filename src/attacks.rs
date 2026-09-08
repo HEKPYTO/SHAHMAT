@@ -221,31 +221,20 @@ const fn file_line(sq: u8) -> u64 {
     0x0101_0101_0101_0101u64 << (sq & 7)
 }
 
-/// Full a1–h8 diagonal through `sq` (slider square included).
-const fn diag_line(sq: u8) -> u64 {
+/// Full diagonal through `sq` (slider square included): a1–h8 when
+/// `anti` is false (file − rank constant), h1–a8 when true (file + rank).
+const fn diag_line(sq: u8, anti: bool) -> u64 {
     let f = sq & 7;
     let r = sq >> 3;
     let mut bb = 0u64;
     let mut s: u8 = 0;
     while s < 64 {
-        // Same `\` diagonal <=> file - rank is constant <=> sf + r == f + sr.
-        if (s & 7) + r == f + (s >> 3) {
-            bb |= 1u64 << s;
-        }
-        s += 1;
-    }
-    bb
-}
-
-/// Full h1–a8 diagonal through `sq` (slider square included).
-const fn anti_line(sq: u8) -> u64 {
-    let f = sq & 7;
-    let r = sq >> 3;
-    let mut bb = 0u64;
-    let mut s: u8 = 0;
-    while s < 64 {
-        // Same `/` diagonal <=> file + rank is constant.
-        if (s & 7) + (s >> 3) == f + r {
+        let same = if anti {
+            (s & 7) + (s >> 3) == f + r
+        } else {
+            (s & 7) + r == f + (s >> 3)
+        };
+        if same {
             bb |= 1u64 << s;
         }
         s += 1;
@@ -276,7 +265,7 @@ const fn rook_occ_mask(sq: u8) -> u64 {
     any(target_arch = "wasm32", target_arch = "x86_64")
 ))]
 const fn bishop_occ_mask(sq: u8) -> u64 {
-    ((diag_line(sq) | anti_line(sq)) & 0x007e_7e7e_7e7e_7e00u64) & !(1u64 << sq)
+    ((diag_line(sq, false) | diag_line(sq, true)) & 0x007e_7e7e_7e7e_7e00u64) & !(1u64 << sq)
 }
 
 /// Total attack-table entries for one mask family (sum of `2^bits`).
@@ -412,8 +401,8 @@ mod hq {
             t[s as usize] = match axis {
                 0 => super::rank_line(s),
                 1 => super::file_line(s),
-                2 => super::diag_line(s),
-                _ => super::anti_line(s),
+                2 => super::diag_line(s, false),
+                _ => super::diag_line(s, true),
             };
             s += 1;
         }

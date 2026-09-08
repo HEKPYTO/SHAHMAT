@@ -590,7 +590,12 @@ pub trait MoveSink {
     /// (singles and captures; doubles go through [`MoveSink::push_pawn_doubles`]).
     fn push_pawn_moves(&mut self, targets: u64, offset: i32);
     /// Double pushes with `from = to - offset` (mover pawn, derived in `make`).
-    fn push_pawn_doubles(&mut self, targets: u64, offset: i32);
+    /// Same encoding as singles today, so the default forwards; override if
+    /// that ever diverges.
+    #[inline(always)]
+    fn push_pawn_doubles(&mut self, targets: u64, offset: i32) {
+        self.push_pawn_moves(targets, offset);
+    }
     /// Promotions with `from = to - offset` (each target expands to N, B, R, Q).
     fn push_pawn_promos(&mut self, targets: u64, offset: i32);
     /// One special or slow-lane move (EP, castles, pinned-pawn singles).
@@ -616,14 +621,6 @@ impl MoveSink for MoveList {
     }
     #[inline(always)]
     fn push_pawn_moves(&mut self, mut targets: u64, offset: i32) {
-        while targets != 0 {
-            let to = targets.trailing_zeros() as u8;
-            targets &= targets - 1;
-            self.push(Move::new((to as i32 - offset) as u8, to, PAWN as u8, 0));
-        }
-    }
-    #[inline(always)]
-    fn push_pawn_doubles(&mut self, mut targets: u64, offset: i32) {
         while targets != 0 {
             let to = targets.trailing_zeros() as u8;
             targets &= targets - 1;
@@ -673,10 +670,6 @@ impl MoveSink for MoveCounter {
     }
     #[inline(always)]
     fn push_pawn_moves(&mut self, targets: u64, _offset: i32) {
-        self.count += targets.count_ones();
-    }
-    #[inline(always)]
-    fn push_pawn_doubles(&mut self, targets: u64, _offset: i32) {
         self.count += targets.count_ones();
     }
     #[inline(always)]
@@ -757,14 +750,6 @@ impl MoveSink for BulkSink {
         }
     }
     #[inline(always)]
-    fn push_pawn_doubles(&mut self, mut t: u64, o: i32) {
-        while t != 0 {
-            let q = t.trailing_zeros() as u8;
-            t &= t - 1;
-            self.one(Move::new((q as i32 - o) as u8, q, PAWN as u8, 0));
-        }
-    }
-    #[inline(always)]
     fn push_pawn_promos(&mut self, mut t: u64, o: i32) {
         while t != 0 {
             let q = t.trailing_zeros() as u8;
@@ -780,7 +765,7 @@ impl MoveSink for BulkSink {
         self.one(m);
     }
 }
-/// Depth-2 bulk total without materialising the parent list (see [`BulkSink`]).
+/// Depth-2 bulk total without materialising the parent list (see `BulkSink`).
 pub fn count_bulk2(b: &mut Board) -> u64 {
     let c = multiply_ctx(b);
     let o = *b;
@@ -829,10 +814,6 @@ impl MoveSink for HasLegal {
     }
     #[inline(always)]
     fn push_pawn_moves(&mut self, targets: u64, _offset: i32) {
-        self.found |= targets != 0;
-    }
-    #[inline(always)]
-    fn push_pawn_doubles(&mut self, targets: u64, _offset: i32) {
         self.found |= targets != 0;
     }
     #[inline(always)]
@@ -2063,13 +2044,14 @@ pub fn make(b: &mut Board, mv: Move) -> StateInfo {
     let ep_sq = db * (((from + to) / 2) as u64) + (1 - db) * (EP_NONE as u64);
     s0 = (s0 & !EP_MASK) | (ep_sq << EP_SHIFT);
 
-    // Halfmove: reset on pawn move or capture.
+    // Halfmove: reset on pawn move or capture, saturating at the 14-bit
+    // field max so the reserved upper bits of state[0] stay zero.
     let hm = (s0 & HM_MASK) >> HM_SHIFT;
     s0 &= !HM_MASK;
     s0 |= if piece == PAWN || captured != NO_CAP {
         0
     } else {
-        (hm + 1) << HM_SHIFT
+        hm.saturating_add(1).min(0x3fff) << HM_SHIFT
     };
 
     // Flip side to move.
@@ -2186,7 +2168,7 @@ pub fn make_quiet(b: &mut Board, mv: Move) -> u64 {
         & CASTLE_KEEP[mv.to() as usize]
         & !(EP_MASK | HM_MASK))
         | ((EP_NONE as u64) << EP_SHIFT)
-        | ((((s0 & HM_MASK) >> HM_SHIFT) + 1) << HM_SHIFT))
+        | ((((s0 & HM_MASK) >> HM_SHIFT).saturating_add(1).min(0x3fff)) << HM_SHIFT))
         ^ STM;
     s0
 }
@@ -2642,6 +2624,30 @@ mod tests {
             !has_legal(&mut b, false),
             "E9: stalemated side must have no legal move"
         );
+    }
+
+    #[test]
+    fn halfmove_saturates_at_field_max() {
+        // 16383 is the largest clock the FEN parser accepts; a quiet move
+        // must not spill into the reserved upper bits of state[0], on
+        // either make path.
+        let (b, list) = legal("k7/8/8/8/8/8/R7/K7 w - - 16383 1");
+        let mv = *list
+            .as_slice()
+            .iter()
+            .find(|m| m.from() == 8 && m.to() == 16)
+            .expect("Ra2-a3 must be legal");
+        let mut full = b;
+        let undo = make(&mut full, mv);
+        assert_eq!((full.state[0] >> 12) & 0x3fff, 16383);
+        assert_eq!(full.state[0] >> 26, 0, "reserved bits stay zero (make)");
+        unmake(&mut full, undo, mv);
+        let mut quiet = b;
+        let s0 = make_quiet(&mut quiet, mv);
+        assert_eq!((quiet.state[0] >> 12) & 0x3fff, 16383);
+        assert_eq!(quiet.state[0] >> 26, 0, "reserved bits stay zero (quiet)");
+        unmake_quiet(&mut quiet, s0, mv);
+        assert_eq!(quiet.state[0], b.state[0]);
     }
     #[test]
     fn has_legal_single_late_move() {
