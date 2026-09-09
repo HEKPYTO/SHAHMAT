@@ -183,21 +183,22 @@ fn pinned_ep_square_repeats() {
 }
 
 #[test]
+fn horizontal_pin_ep_square_repeats() {
+    use shahmat::api::Game;
+    // exd6 vacates e5 and removes d5, opening the a5-h5 line onto the h5
+    // king — so the capture is illegal and the return counts 2.
+    let mut g = Game::from_fen("1k6/8/8/r2pP2K/8/8/8/8 w - d6 0 1").unwrap();
+    for san in ["Kg5", "Ka8", "Kh5", "Kb8"] {
+        g.push_san(san).unwrap();
+    }
+    assert_eq!(g.repetition_count(), 2);
+}
+
+#[test]
 fn ep_liveness_predicate() {
     use shahmat::fen;
     use shahmat::movegen::has_legal_ep_capture;
-    // Dead: no capturer adjacent to d3.
-    let dead = fen::parse("rnbqkbnr/ppp1pppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq d3 0 2").unwrap();
-    assert!(!has_legal_ep_capture(&dead));
-    // Live: e5 captures d6 legally.
-    let live = fen::parse("6k1/8/8/3pP3/8/4K3/8/1N6 w - d6 0 1").unwrap();
-    assert!(has_legal_ep_capture(&live));
-    // Vertical pin: e5 pseudo-captures d6, but the e8 rook pins it onto
-    // the e3 king.
-    let vpin = fen::parse("4r1k1/8/8/3pP3/8/4K3/8/1N6 w - d6 0 1").unwrap();
-    assert!(!has_legal_ep_capture(&vpin));
-    // Horizontal pin: exd6 vacates e5 and removes d5, opening the a5-h5
-    // line onto the h5 king.
+    // Horizontal pin (no game tour covers this branch directly).
     let hpin = fen::parse("1k6/8/8/r2pP2K/8/8/8/8 w - d6 0 1").unwrap();
     assert!(!has_legal_ep_capture(&hpin));
     // No square, no capture.
