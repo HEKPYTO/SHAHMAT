@@ -4,7 +4,7 @@ All notable changes to the `shahmat` library are documented here. The format
 follows “Keep a Changelog”; versions follow Semantic Versioning. Public API
 is frozen from 1.0.0 — breaking changes will bump the major version.
 
-## [Unreleased]
+## [1.0.1] — 2026-09-09
 
 ### Fixed
 
