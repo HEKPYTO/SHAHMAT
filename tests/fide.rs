@@ -143,14 +143,64 @@ fn repetition_survives_pgn_round_trip() {
 }
 
 #[test]
-fn dead_ep_square_counts_distinct() {
-    use shahmat::board::board_hash;
+fn dead_ep_square_repeats() {
+    use shahmat::api::Game;
+    // No black pawn stands ready to capture d3 (c4/e4 empty) — a dead
+    // square. Knights tour out and back, clearing the stored EP square,
+    // yet repetition still sees the return: FIDE-exact, threefold never
+    // missed (pre-fix this counted 1).
+    let mut g =
+        Game::from_fen("rnbqkbnr/ppp1pppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq d3 0 2").unwrap();
+    for san in ["Nf6", "Nf3", "Ng8", "Ng1"] {
+        g.push_san(san).unwrap();
+    }
+    assert_eq!(g.repetition_count(), 2);
+}
+
+#[test]
+fn live_ep_square_splits() {
+    use shahmat::api::Game;
+    // e5 captures d6 legally, so the stored EP square is a real option:
+    // clearing it with quiet knight shuttles changes the position and
+    // the return counts 1 (merged keys would wrongly count 2).
+    let mut g = Game::from_fen("6k1/8/8/3pP3/8/4K3/8/1N6 w - d6 0 1").unwrap();
+    for san in ["Nc3", "Kh8", "Nb1", "Kg8"] {
+        g.push_san(san).unwrap();
+    }
+    assert_eq!(g.repetition_count(), 1);
+}
+
+#[test]
+fn pinned_ep_square_repeats() {
+    use shahmat::api::Game;
+    // e5 pseudo-captures d6, but the e8 rook pins it onto the e3 king:
+    // no legal EP move exists, so the return still counts 2.
+    let mut g = Game::from_fen("4r1k1/8/8/3pP3/8/4K3/8/1N6 w - d6 0 1").unwrap();
+    for san in ["Nc3", "Kh8", "Nb1", "Kg8"] {
+        g.push_san(san).unwrap();
+    }
+    assert_eq!(g.repetition_count(), 2);
+}
+
+#[test]
+fn ep_liveness_predicate() {
     use shahmat::fen;
-    // Same pieces, side, and rights; only the EP square differs, and no
-    // black pawn stands ready to capture it (c4/e4 empty) — a dead square.
-    // Conservative direction: distinct hashes, so repetition can
-    // undercount, never overcount into phantom draws.
+    use shahmat::movegen::has_legal_ep_capture;
+    // Dead: no capturer adjacent to d3.
     let dead = fen::parse("rnbqkbnr/ppp1pppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq d3 0 2").unwrap();
-    let none = fen::parse("rnbqkbnr/ppp1pppp/8/8/3P4/8/PPP1PPPP/RNBQKBNR b KQkq - 0 2").unwrap();
-    assert_ne!(board_hash(&dead), board_hash(&none));
+    assert!(!has_legal_ep_capture(&dead));
+    // Live: e5 captures d6 legally.
+    let live = fen::parse("6k1/8/8/3pP3/8/4K3/8/1N6 w - d6 0 1").unwrap();
+    assert!(has_legal_ep_capture(&live));
+    // Vertical pin: e5 pseudo-captures d6, but the e8 rook pins it onto
+    // the e3 king.
+    let vpin = fen::parse("4r1k1/8/8/3pP3/8/4K3/8/1N6 w - d6 0 1").unwrap();
+    assert!(!has_legal_ep_capture(&vpin));
+    // Horizontal pin: exd6 vacates e5 and removes d5, opening the a5-h5
+    // line onto the h5 king.
+    let hpin = fen::parse("1k6/8/8/r2pP2K/8/8/8/8 w - d6 0 1").unwrap();
+    assert!(!has_legal_ep_capture(&hpin));
+    // No square, no capture.
+    let none = fen::parse("6k1/8/8/3pP3/4K3/8/8/8 w - - 0 1").unwrap();
+    assert!(!has_legal_ep_capture(&none));
 }

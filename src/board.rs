@@ -239,6 +239,18 @@ pub fn board_hash(b: &Board) -> u64 {
     h
 }
 
+/// Zobrist contribution of an en-passant square: the exact xor
+/// [`board_hash`] mixes for `sq`, or `0` for [`EP_NONE`]/out-of-range.
+/// Lets repetition keys mask a dead EP square back out without
+/// re-hashing the board.
+pub fn ep_key(sq: u8) -> u64 {
+    if (sq as usize) < 64 {
+        ZOBRIST.ep[sq as usize]
+    } else {
+        0
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

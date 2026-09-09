@@ -27,9 +27,11 @@
 //! - Move numbering in [`Game::to_pgn`] always starts at 1 (fullmove is not
 //!   stored by FEN render, which always emits `1`).
 
-use crate::board::{board_hash, Board, Move, StateInfo};
+use crate::board::{board_hash, ep_key, Board, Move, StateInfo, EP_NONE};
 use crate::fen::{self, STARTPOS};
-use crate::movegen::{generate_legal, has_legal, is_in_check, make, unmake, MoveList};
+use crate::movegen::{
+    generate_legal, has_legal, has_legal_ep_capture, is_in_check, make, unmake, MoveList,
+};
 use crate::pgn::{self, PgnError};
 use std::collections::BTreeMap;
 use std::fmt;
@@ -223,7 +225,7 @@ impl Game {
     /// Game from a FEN string (also becomes the [`Game::reset`] target).
     pub fn from_fen(fen_str: &str) -> Result<Game, GameError> {
         let board = fen::parse(fen_str)?;
-        let hashes = vec![board_hash(&board)];
+        let hashes = vec![Self::rep_key(&board)];
         Ok(Game {
             board,
             history: Vec::new(),
@@ -435,7 +437,7 @@ impl Game {
         let san = self.san_of_move(mv);
         let undo = make(&mut self.board, mv);
         self.history.push((mv, undo, san.clone()));
-        self.hashes.push(board_hash(&self.board));
+        self.hashes.push(Self::rep_key(&self.board));
         Ok(san)
     }
 
@@ -517,13 +519,27 @@ impl Game {
     }
 
     /// Occurrences of the current position in this game (initial plus one
-    /// per ply). Keys are full-recompute Zobrist hashes (pieces + side to
-    /// move + rights + EP square): a dead EP square (no legal EP capture)
-    /// still hashes distinctly, so rare repetitions through dead EP squares
-    /// can undercount — errs toward fewer draws, never phantom ones.
+    /// per ply). Keys are Zobrist hashes with one FIDE-exact refinement:
+    /// a stored EP square with no legal capture is masked out, so
+    /// positions differing only by a dead EP square share a key and
+    /// threefold is never missed; a live EP square keeps its xor and
+    /// still splits keys (see [`rep_key`]).
     pub fn repetition_count(&self) -> u8 {
-        let cur = board_hash(&self.board);
+        let cur = Self::rep_key(&self.board);
         self.hashes.iter().filter(|&&h| h == cur).count().min(255) as u8
+    }
+
+    /// Repetition key: [`board_hash`] with a dead EP square masked back out.
+    /// Hashes stay raw everywhere else (TT, caches); only the game-history
+    /// comparison normalises, so perft throughput is untouched.
+    fn rep_key(b: &Board) -> u64 {
+        let ep = ((b.state[0] >> 5) & 0x7F) as u8;
+        let h = board_hash(b);
+        if ep != EP_NONE && !has_legal_ep_capture(b) {
+            h ^ ep_key(ep)
+        } else {
+            h
+        }
     }
 
     /// Threefold repetition claimable: current position occurred 3+ times.
@@ -581,7 +597,7 @@ impl Game {
             self.board = board;
         }
         self.history.clear();
-        self.hashes = vec![board_hash(&self.board)];
+        self.hashes = vec![Self::rep_key(&self.board)];
     }
 
     /// Load a new FEN: clears history, keeps headers, and becomes the new
@@ -589,7 +605,7 @@ impl Game {
     pub fn load_fen(&mut self, fen_str: &str) -> Result<(), GameError> {
         self.board = fen::parse(fen_str)?;
         self.history.clear();
-        self.hashes = vec![board_hash(&self.board)];
+        self.hashes = vec![Self::rep_key(&self.board)];
         self.initial_fen = fen_str.to_string();
         Ok(())
     }
@@ -655,7 +671,7 @@ impl Game {
         self.board = fen::parse(&start)?;
         self.initial_fen = start;
         self.history.clear();
-        self.hashes = vec![board_hash(&self.board)];
+        self.hashes = vec![Self::rep_key(&self.board)];
         self.headers.clear();
         for (name, value) in &game.tags {
             self.headers.insert(name.clone(), value.clone());

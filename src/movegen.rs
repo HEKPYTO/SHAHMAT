@@ -563,6 +563,69 @@ pub fn is_in_check(b: &Board, white: bool) -> bool {
     is_attacked(b, king.trailing_zeros() as u8, !white)
 }
 
+/// Whether side to move owns a *legal* en-passant capture on the stored
+/// EP square. False for [`EP_NONE`](crate::board::EP_NONE), malformed
+/// squares, a missing victim, no adjacent pawn, or captures that all
+/// expose the mover's king (pins included — each capture is simulated
+/// and re-checked with [`is_in_check`]). Repetition keys use this to
+/// merge positions with no legal EP move (FIDE 9.2) instead of missing
+/// threefolds through dead EP squares.
+pub fn has_legal_ep_capture(b: &Board) -> bool {
+    let ep = ((b.state[0] >> EP_SHIFT) & 0x7F) as u8;
+    if ep >= 64 {
+        return false;
+    }
+    let white = stm_white(b);
+    // A capturable EP square sits on the capturer's 6th rank; anything
+    // else is malformed input with no legal capture by construction.
+    let file = ep % 8;
+    if ep / 8 != if white { 5 } else { 2 } {
+        return false;
+    }
+    let occ = b.occupancies;
+    // Victim: the just-double-pushed enemy pawn directly behind `ep`.
+    let victim = if white { ep - 8 } else { ep + 8 };
+    let vbit = 1u64 << victim;
+    let (own, enemy) = if white { (6, 7) } else { (7, 6) };
+    if occ[PAWN] & occ[enemy] & vbit == 0 {
+        return false;
+    }
+    // Adjacent files on the capturer rank; the rank check above keeps
+    // every shift on-board.
+    let mut mask = 0u64;
+    if file > 0 {
+        mask |= 1u64 << if white { ep - 9 } else { ep + 7 };
+    }
+    if file < 7 {
+        mask |= 1u64 << if white { ep - 7 } else { ep + 9 };
+    }
+    let mut caps = occ[PAWN] & occ[own] & mask;
+    while caps != 0 {
+        let c = caps.trailing_zeros() as u8;
+        caps &= caps - 1;
+        // Simulate the capture and re-check our king: exact, pins included.
+        let mut s = *b;
+        let cbit = 1u64 << c;
+        let ebit = 1u64 << ep;
+        let o = &mut s.occupancies;
+        o[PAWN] &= !cbit;
+        o[own] &= !cbit;
+        o[8] &= !cbit;
+        o[PAWN] &= !vbit;
+        o[enemy] &= !vbit;
+        o[8] &= !vbit;
+        o[PAWN] |= ebit;
+        o[own] |= ebit;
+        o[8] |= ebit;
+        s.state[0] = (s.state[0] & !EP_MASK) | ((EP_NONE as u64) << EP_SHIFT);
+        s.state[0] ^= STM;
+        if !is_in_check(&s, white) {
+            return true;
+        }
+    }
+    false
+}
+
 // ---------------------------------------------------------------------------
 // Fully-legal generation (sink-generic, zero make/unmake).
 // ---------------------------------------------------------------------------
