@@ -38,7 +38,9 @@ use crate::movegen::{make_quiet, unmake_quiet, OCC};
 pub const MAX_DEPTH: u32 = 128;
 
 /// Full make/unmake perft: leaf count of legal move paths to `depth`.
-/// Depth 0 = 1 (the identity count, no moves generated).
+/// Depth 0 = 1 (the identity count, no moves generated). Totals saturate
+/// at `u64::MAX` past ~d18 instead of wrapping, identically in debug
+/// and release.
 #[inline(never)]
 pub fn perft(board: &Board, depth: u32) -> u64 {
     assert!(
@@ -216,13 +218,13 @@ impl Tt {
     /// Exact-hit probe: `Some(nodes)` iff a slot in the key's bucket holds
     /// `key` with an equal `depth`. No allocation.
     pub fn probe(&mut self, key: u64, depth: u32) -> Option<u64> {
-        self.probes += 1;
+        self.probes = self.probes.saturating_add(1);
         let bucket = &self.buckets[(key as usize) & self.mask];
         let mut i = 0usize;
         while i < TT_BUCKET {
             let s = &bucket[i];
             if s.used && s.key == key && s.depth == depth {
-                self.hits += 1;
+                self.hits = self.hits.saturating_add(1);
                 return Some(s.nodes);
             }
             i += 1;
@@ -281,12 +283,12 @@ fn full_mut(b: &mut Board, depth: u32) -> u64 {
         let castle = m == 5 && ((mv.to() & 7) as i8 - (mv.from() & 7) as i8).abs() == 2;
         if mv.promo() == 0 && b.occupancies[OCC] & (1u64 << mv.to()) == 0 && m != 0 && !castle {
             let s0 = make_quiet(b, mv);
-            nodes += full_mut(b, depth - 1);
+            nodes = nodes.saturating_add(full_mut(b, depth - 1));
             unmake_quiet(b, s0, mv);
             continue;
         }
         let undo = make(b, mv);
-        nodes += full_mut(b, depth - 1);
+        nodes = nodes.saturating_add(full_mut(b, depth - 1));
         unmake(b, undo, mv);
     }
     nodes
@@ -320,7 +322,7 @@ fn full_tt(b: &mut Board, depth: u32, tt: &mut Tt) -> u64 {
     for i in 0..list.len {
         let mv = list.moves[i];
         let undo = make(b, mv);
-        nodes += full_tt(b, depth - 1, tt);
+        nodes = nodes.saturating_add(full_tt(b, depth - 1, tt));
         unmake(b, undo, mv);
     }
     tt.store(key, depth, nodes);
@@ -347,7 +349,7 @@ fn bulk_mut(b: &mut Board, depth: u32) -> u64 {
     for i in 0..list.len {
         let mv = list.moves[i];
         let undo = make(b, mv);
-        nodes += bulk_mut(b, depth - 1);
+        nodes = nodes.saturating_add(bulk_mut(b, depth - 1));
         unmake(b, undo, mv);
     }
     nodes

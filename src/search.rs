@@ -44,6 +44,7 @@
 use crate::attacks::{bishop_attacks, rook_attacks};
 use crate::board::{board_hash, Board, Move};
 use crate::movegen::{generate_legal, is_in_check, make, unmake, MoveList};
+use crate::perft::MAX_DEPTH;
 
 /// Mate-score anchor; one ply subtracted per move so faster mates win.
 pub const MATE: i32 = 100_000;
@@ -600,7 +601,7 @@ impl SearchTt {
     /// the window), and any stored best move rides along for ordering.
     /// Mate scores are un-adjusted to the probing `ply`. No allocation.
     pub fn probe(&mut self, key: u64, depth: u32, alpha: i32, beta: i32, ply: i32) -> SearchProbe {
-        self.probes += 1;
+        self.probes = self.probes.saturating_add(1);
         let bucket = &self.buckets[(key as usize) & self.mask];
         let mut out = SearchProbe {
             score: None,
@@ -848,7 +849,7 @@ fn quiescence(
     qply: i32,
     stats: &mut Stats,
 ) -> i32 {
-    stats.nodes += 1;
+    stats.nodes = stats.nodes.saturating_add(1);
     let white = stm_white(b);
     let check = is_in_check(b, white);
     let mut list = MoveList::new();
@@ -930,7 +931,7 @@ fn negamax(
     mut tt: Option<&mut SearchTt>,
     stats: &mut Stats,
 ) -> i32 {
-    stats.nodes += 1;
+    stats.nodes = stats.nodes.saturating_add(1);
     let white = stm_white(b);
     let mut list = MoveList::new();
     generate_legal(b, &mut list);
@@ -995,9 +996,9 @@ fn negamax(
         }
         if alpha >= beta {
             if i < na {
-                stats.cuts_a += 1;
+                stats.cuts_a = stats.cuts_a.saturating_add(1);
             } else {
-                stats.cuts_b += 1;
+                stats.cuts_b = stats.cuts_b.saturating_add(1);
             }
             break;
         }
@@ -1034,6 +1035,10 @@ pub fn search_best_tt(
     mut tt: Option<&mut SearchTt>,
     stats: &mut Stats,
 ) -> Option<(Move, i32)> {
+    assert!(
+        depth <= MAX_DEPTH,
+        "search depth {depth} exceeds MAX_DEPTH={MAX_DEPTH}"
+    );
     let mut b = *board;
     let mut list = MoveList::new();
     generate_legal(&mut b, &mut list);
@@ -1087,13 +1092,17 @@ pub fn search_iterative(
     max_depth: u32,
     mut tt: Option<&mut SearchTt>,
 ) -> Vec<IterRow> {
+    assert!(
+        max_depth <= MAX_DEPTH,
+        "search max_depth {max_depth} exceeds MAX_DEPTH={MAX_DEPTH}"
+    );
     let mut rows = Vec::new();
     let mut total = 0u64;
     let mut d = 1u32;
     while d <= max_depth {
         let mut stats = Stats::default();
         let found = search_best_tt(board, d, tt.as_deref_mut(), &mut stats);
-        total += stats.nodes;
+        total = total.saturating_add(stats.nodes);
         let (best, score) = match found {
             Some((m, s)) => (Some(m), s),
             None => (None, 0),
@@ -1125,6 +1134,23 @@ mod tests {
     const CHECK_ESCAPES: &str = "5k2/8/8/8/8/8/5R2/6K1 b - - 0 1";
     const SCHOLARS: &str = "r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNBQK1NR w KQkq - 4 4";
     const STALEMATE: &str = "k7/8/1Q6/8/8/8/8/K7 b - - 0 1";
+
+    /// Public entries reject depths past MAX_DEPTH instead of recursing
+    /// into stack exhaustion (SHM-01).
+    #[test]
+    #[should_panic(expected = "exceeds MAX_DEPTH")]
+    fn root_depth_cap_asserts() {
+        let b = pos(fen::STARTPOS);
+        let mut stats = Stats::default();
+        let _ = search_best_tt(&b, u32::MAX, None, &mut stats);
+    }
+
+    #[test]
+    #[should_panic(expected = "exceeds MAX_DEPTH")]
+    fn iterative_depth_cap_asserts() {
+        let b = pos(fen::STARTPOS);
+        let _ = search_iterative(&b, u32::MAX, None);
+    }
 
     /// Past the cap the horizon claims nothing: alpha in check (never an
     /// illegal stand-pat) and the alpha-raised stand-pat when quiet.
@@ -1337,9 +1363,9 @@ mod tests {
             for d in 1..=4u32 {
                 let mut s = Stats::default();
                 let _ = search_best_tt(&b, d, Some(&mut tt), &mut s);
-                agg.cuts_a += s.cuts_a;
-                agg.cuts_b += s.cuts_b;
-                agg.nodes += s.nodes;
+                agg.cuts_a = agg.cuts_a.saturating_add(s.cuts_a);
+                agg.cuts_b = agg.cuts_b.saturating_add(s.cuts_b);
+                agg.nodes = agg.nodes.saturating_add(s.nodes);
             }
             println!(
                 "K7 {name}: cuts_a={} cuts_b={} frac={:.3} nodes={}",

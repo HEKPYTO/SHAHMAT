@@ -189,7 +189,7 @@ fn main() -> ExitCode {
         let mut total = 0u64;
         for r in &rows {
             println!("{}: {}", r.text, r.nodes);
-            total += r.nodes;
+            total = total.saturating_add(r.nodes);
         }
         (total, 0, 0)
     } else {
@@ -256,9 +256,9 @@ fn count_root_split(board: &Board, depth: u32, jobs: usize, mode: Mode) -> (u64,
         }
         for h in handles {
             let (n, p, h_) = h.join().expect("perft worker panicked");
-            total += n;
-            probes += p;
-            hits += h_;
+            total = total.saturating_add(n);
+            probes = probes.saturating_add(p);
+            hits = hits.saturating_add(h_);
         }
     });
     (total, probes, hits)
@@ -317,10 +317,10 @@ fn count_prefix_chunk(
             let mut child = *board;
             make(&mut child, m1);
             make(&mut child, m2);
-            total += perft_tt(&child, depth - 2, &mut tt);
+            total = total.saturating_add(perft_tt(&child, depth - 2, &mut tt));
         }
-        probes += tt.probes();
-        hits += tt.hits();
+        probes = probes.saturating_add(tt.probes());
+        hits = hits.saturating_add(tt.hits());
     } else {
         // Bulk2/Full differ only in the leaf counter: picked here, where it
         // is used, so the Tt arm above can never route through it and
@@ -334,7 +334,7 @@ fn count_prefix_chunk(
             let mut child = *board;
             make(&mut child, m1);
             make(&mut child, m2);
-            total += plain(&child, depth - 2);
+            total = total.saturating_add(plain(&child, depth - 2));
         }
     }
     (total, probes, hits)

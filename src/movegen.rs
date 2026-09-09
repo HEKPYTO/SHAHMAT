@@ -791,7 +791,7 @@ impl BulkSink {
         } else {
             self.w = self.o;
             make(&mut self.w, m);
-            self.n += count_legal(&mut self.w) as u64;
+            self.n = self.n.saturating_add(count_legal(&mut self.w) as u64);
         }
     }
 }
@@ -2493,11 +2493,11 @@ mod tests {
             let n = count_legal(&mut counter) as u64;
             unmake(&mut child, undo, *m);
             assert_eq!(child, live, "make/unmake drift at {fen}");
-            plain += n;
+            plain = plain.saturating_add(n);
             if multiply_is_quiet(&ctx, &live, *m) {
-                quiet += 1;
+                quiet = quiet.saturating_add(1);
             } else {
-                exact += n;
+                exact = exact.saturating_add(n);
             }
         }
         assert_eq!(
