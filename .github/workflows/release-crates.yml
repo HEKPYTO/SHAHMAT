@@ -1,0 +1,66 @@
+# SHAHMAT crates.io release — tag-gated publish.
+#
+# Fires only on `v*` tag pushes. Re-runs the trusted gate subset natively,
+# verifies the tag matches `Cargo.toml`, then `cargo publish` using the
+# `CRATESIO_API_KEY` repo secret. Local `cargo publish` stays off: the
+# registry upload happens here and nowhere else.
+name: release-crates
+
+on:
+  push:
+    tags: ["v*"]
+  # Backstop for tags pushed before this workflow existed:
+  # run manually from the Actions tab with version = tag version.
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Crate version to publish (must match Cargo.toml)"
+        required: true
+        default: "1.0.0"
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: gate + publish to crates.io
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: version matches Cargo.toml version
+        run: |
+          set -euo pipefail
+          VER="$(grep -m1 '^version = ' Cargo.toml | cut -d'"' -f2)"
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            WANT="${{ inputs.version }}"
+          else
+            WANT="${GITHUB_REF_NAME#v}"
+          fi
+          test "${WANT}" = "${VER}" || {
+            echo "::error::requested ${WANT} != Cargo.toml ${VER}"
+            exit 1
+          }
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: fmt
+        run: cargo fmt --all -- --check
+
+      - name: clippy
+        run: cargo clippy --locked --all-targets -- -D warnings
+
+      - name: test (debug)
+        run: cargo test --locked -p shahmat
+
+      - name: test (release)
+        run: cargo test --locked --release -p shahmat
+
+      - name: publish
+        run: cargo publish --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ secrets.CRATESIO_API_KEY }}
