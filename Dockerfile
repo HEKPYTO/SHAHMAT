@@ -14,7 +14,7 @@ RUN --mount=type=cache,target=/var/cache/cargo,sharing=locked \
     --mount=type=cache,target=/app/target \
     export CARGO_HOME=/var/cache/cargo; \
     cargo fetch --locked
-# musl static targets for the Alpine dist (layer cached until the Dockerfile
+# musl static targets for the scratch dist (layer cached until the Dockerfile
 # above changes; zero C code, so rust-lld self-contained linking needs no
 # musl-tools).
 RUN rustup target add x86_64-unknown-linux-musl aarch64-unknown-linux-musl && rustup component add llvm-tools-preview
@@ -35,8 +35,9 @@ RUN --mount=type=cache,target=/app/target \
     RUSTFLAGS="$RUSTFLAGS $EXP_FLAGS -Cprofile-use=/tmp/pgo.profdata" cargo build --locked --frozen --release --target "$MUSL_TRIPLE" && \
     cp target/"$MUSL_TRIPLE"/release/shahmat-svc /out-svc
 
-# Runtime tracks the stable Alpine minor branch (no SHA pin, same reason).
-FROM alpine:3.24
+# Runtime is empty: the binary is fully static musl (no libc, no shell,
+# no certs — the svc makes no TLS calls), so there is nothing to update.
+FROM scratch
 COPY --from=build /out-svc /svc
 USER 65532:65532
 EXPOSE 8080

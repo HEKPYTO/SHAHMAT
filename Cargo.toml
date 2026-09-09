@@ -26,6 +26,6 @@ pext = []
 
 [profile.release]
 opt-level = 3
+strip = true
 lto = "fat"
 codegen-units = 1
-strip = "debuginfo"

@@ -87,7 +87,7 @@ Details, protocol, and PGO recipe: `bench/README.md`.
 
 - `src/` — full API + dev standards (`src/README.md`).
 - `tests/` — coverage map (`tests/README.md`).
-- `Dockerfile`, `compose.yaml` — Alpine static-musl image (nonroot 65532).
+- `Dockerfile`, `compose.yaml` — scratch static-musl image (nonroot 65532).
 - `.github/` — CI gate (fmt, clippy, tests, exact d6, smoke + size), GHCR images, crates.io publish on `v*` tags.
 - `CHANGELOG.md` — release notes; public API frozen since 1.0.0.
 
