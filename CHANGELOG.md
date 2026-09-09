@@ -2,9 +2,9 @@
 
 All notable changes to the `shahmat` library are documented here. The format
 follows “Keep a Changelog”; versions follow Semantic Versioning. Public API
-is frozen from 0.1.0 — breaking changes will bump the major version.
+is frozen from 1.0.0 — breaking changes will bump the major version.
 
-## [0.1.0] — 2026-09-08
+## [1.0.0] — 2026-09-09
 
 First release: movegen-correct chess library with perft counting,
 strict-FIDE game adjudication, and a lib-scoped exact search substrate.

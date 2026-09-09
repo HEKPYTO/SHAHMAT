@@ -1,6 +1,6 @@
 [package]
 name = "shahmat"
-version = "0.1.0"
+version = "1.0.0"
 edition = "2021"
 description = "Movegen-correct chess lib: exact perft and search, fast with less memory per platform"
 license = "Apache-2.0"
