@@ -4,6 +4,16 @@ All notable changes to the `shahmat` library are documented here. The format
 follows “Keep a Changelog”; versions follow Semantic Versioning. Public API
 is frozen from 1.0.0 — breaking changes will bump the major version.
 
+## [1.0.2] — 2026-09-09
+
+### Fixed
+
+- Node/probe/hit counters saturate at `u64::MAX` instead of wrapping
+  (release) or panicking (debug): one behavior past ~d18, still exact
+  everywhere reachable.
+- Public search entries assert `depth <= MAX_DEPTH` instead of recursing
+  into stack exhaustion on absurd inputs.
+
 ## [1.0.1] — 2026-09-09
 
 ### Fixed
