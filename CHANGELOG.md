@@ -4,6 +4,14 @@ All notable changes to the `shahmat` library are documented here. The format
 follows “Keep a Changelog”; versions follow Semantic Versioning. Public API
 is frozen from 1.0.0 — breaking changes will bump the major version.
 
+## [Unreleased]
+
+### Fixed
+
+- Repetition keys mask dead en-passant squares (no legal capture):
+  positions differing only by such a square share a key, so threefold
+  is never missed. Live EP squares still split keys.
+
 ## [1.0.0] — 2026-09-09
 
 First release: movegen-correct chess library with perft counting,

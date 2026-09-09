@@ -198,6 +198,19 @@ fn promo_code(ch: char) -> Option<u8> {
     }
 }
 
+/// Repetition key: [`board_hash`] with a dead EP square masked back out.
+/// Hashes stay raw everywhere else (TT, caches); only the game-history
+/// comparison normalises, so perft throughput is untouched.
+fn rep_key(b: &Board) -> u64 {
+    let ep = ((b.state[0] >> 5) & 0x7F) as u8;
+    let h = board_hash(b);
+    if ep != EP_NONE && !has_legal_ep_capture(b) {
+        h ^ ep_key(ep)
+    } else {
+        h
+    }
+}
+
 impl Game {
     /// Startpos game with empty headers (FIDE adjudication on).
     pub fn new() -> Game {
@@ -225,7 +238,7 @@ impl Game {
     /// Game from a FEN string (also becomes the [`Game::reset`] target).
     pub fn from_fen(fen_str: &str) -> Result<Game, GameError> {
         let board = fen::parse(fen_str)?;
-        let hashes = vec![Self::rep_key(&board)];
+        let hashes = vec![rep_key(&board)];
         Ok(Game {
             board,
             history: Vec::new(),
@@ -437,7 +450,7 @@ impl Game {
         let san = self.san_of_move(mv);
         let undo = make(&mut self.board, mv);
         self.history.push((mv, undo, san.clone()));
-        self.hashes.push(Self::rep_key(&self.board));
+        self.hashes.push(rep_key(&self.board));
         Ok(san)
     }
 
@@ -525,21 +538,8 @@ impl Game {
     /// threefold is never missed; a live EP square keeps its xor and
     /// still splits keys (see [`rep_key`]).
     pub fn repetition_count(&self) -> u8 {
-        let cur = Self::rep_key(&self.board);
+        let cur = rep_key(&self.board);
         self.hashes.iter().filter(|&&h| h == cur).count().min(255) as u8
-    }
-
-    /// Repetition key: [`board_hash`] with a dead EP square masked back out.
-    /// Hashes stay raw everywhere else (TT, caches); only the game-history
-    /// comparison normalises, so perft throughput is untouched.
-    fn rep_key(b: &Board) -> u64 {
-        let ep = ((b.state[0] >> 5) & 0x7F) as u8;
-        let h = board_hash(b);
-        if ep != EP_NONE && !has_legal_ep_capture(b) {
-            h ^ ep_key(ep)
-        } else {
-            h
-        }
     }
 
     /// Threefold repetition claimable: current position occurred 3+ times.
@@ -597,7 +597,7 @@ impl Game {
             self.board = board;
         }
         self.history.clear();
-        self.hashes = vec![Self::rep_key(&self.board)];
+        self.hashes = vec![rep_key(&self.board)];
     }
 
     /// Load a new FEN: clears history, keeps headers, and becomes the new
@@ -605,7 +605,7 @@ impl Game {
     pub fn load_fen(&mut self, fen_str: &str) -> Result<(), GameError> {
         self.board = fen::parse(fen_str)?;
         self.history.clear();
-        self.hashes = vec![Self::rep_key(&self.board)];
+        self.hashes = vec![rep_key(&self.board)];
         self.initial_fen = fen_str.to_string();
         Ok(())
     }
@@ -671,7 +671,7 @@ impl Game {
         self.board = fen::parse(&start)?;
         self.initial_fen = start;
         self.history.clear();
-        self.hashes = vec![Self::rep_key(&self.board)];
+        self.hashes = vec![rep_key(&self.board)];
         self.headers.clear();
         for (name, value) in &game.tags {
             self.headers.insert(name.clone(), value.clone());
