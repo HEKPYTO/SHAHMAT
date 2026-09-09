@@ -1,26 +1,30 @@
 # SHAHMAT
 
-Movegen-correct chess lib — fast with less memory on each platform. Apache-2.0.
+[![CI](https://github.com/HEKPYTO/SHAHMAT/actions/workflows/ci.yml/badge.svg)](https://github.com/HEKPYTO/SHAHMAT/actions/workflows/ci.yml)
+[![Crates.io](https://img.shields.io/crates/v/shahmat.svg)](https://crates.io/crates/shahmat)
+[![Docs](https://docs.rs/shahmat/badge.svg)](https://docs.rs/shahmat)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
 
-## Init
+Movegen-correct chess library — exact perft counting and an exact search substrate, fast with less memory on each platform. Apache-2.0.
 
-Prereqs: Rust 1.98+ (`rustup update stable`), Docker with buildx for the image.
+## Install
+
+Prereqs: Rust 1.98+ (`rustup update stable`); Docker with buildx only for the container image.
 
 ```sh
-git clone git@github.com:HEKPYTO/SHAHMAT.git && cd SHAHMAT
+cargo add shahmat
+cargo install shahmat  # also installs the `shahmat-svc` service binary
+```
+
+From source:
+
+```sh
+git clone https://github.com/HEKPYTO/SHAHMAT.git && cd SHAHMAT
 cargo build --release
 cargo test
-docker compose up --build
 ```
 
 ## Use as a library
-
-Not on crates.io — depend via git:
-
-```toml
-[dependencies]
-shahmat = { git = "https://github.com/HEKPYTO/SHAHMAT.git" }
-```
 
 ```rust
 use shahmat::fen;
@@ -44,10 +48,24 @@ g.push_san("e5").unwrap();
 assert_eq!(g.history_san(), ["e4", "e5"]);
 ```
 
-Scope: no draws of any kind, no board editing. Details: `src/README.md`.
+Scope: movegen, counting, search, and game adjudication — no engine (no time control, no opening book). Details: `src/README.md`.
+
+## Features
+
+| Feature | Effect |
+| --- | --- |
+| default (`magic-black`) | Black-magic slider engine (ignored on aarch64, which is HQ-only) |
+| `min-mem` | HQ-only 2 KiB tables; build with `--no-default-features --features min-mem` |
+| `pext` | x86_64 only (compile error elsewhere); runtime PEXT-or-fallback slider pick |
+| `nif` | Elixir bindings via Rustler |
+
+`min-mem` + `pext` is a conflicting combination (compile error). Slider caveats: `src/README.md`.
 
 ## Use as a service
-Recommended deployment is the Docker image — the crates.io release is for library use.
+
+The intended deployment is Docker (pinned toolchain, static musl binary,
+nonroot user) even though the crate is on crates.io — `cargo install` is
+for trying it, containers are for running it.
 
 ```sh
 shahmat-svc --health-check            # prints ok, exit 0
@@ -70,7 +88,8 @@ Details, protocol, and PGO recipe: `bench/README.md`.
 - `src/` — full API + dev standards (`src/README.md`).
 - `tests/` — coverage map (`tests/README.md`).
 - `Dockerfile`, `compose.yaml` — Alpine static-musl image (nonroot 65532).
-- `.github/` — CI gate (fmt, clippy, tests, exact d6, smoke + size).
+- `.github/` — CI gate (fmt, clippy, tests, exact d6, smoke + size), GHCR images, crates.io publish on `v*` tags.
+- `CHANGELOG.md` — release notes; public API frozen since 0.1.0.
 
 ## License
 

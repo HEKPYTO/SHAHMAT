@@ -940,13 +940,23 @@ fn generate_moves_into<S: MoveSink, const WHITE: bool>(b: &Board, sink: &mut S) 
 ///   shared instead of repeated.
 #[inline(always)]
 fn emit_castles<S: MoveSink, const WHITE: bool>(b: &Board, occ: u64, sink: &mut S) {
+    // The king must actually stand on its home square: rights flags on a
+    // kingless (malformed) FEN would otherwise emit castles from an empty
+    // square, tripping make's mover assert (or worse, in release).
+    if b.occupancies[KING] & (1u64 << if WHITE { 4 } else { 60 }) == 0 {
+        return;
+    }
     if WHITE {
         let rights = b.state[0] & (WK | WQ);
         if rights == 0 {
             return;
         }
-        let short_open = rights & WK != 0 && occ & ((1u64 << 5) | (1u64 << 6)) == 0;
-        let long_open = rights & WQ != 0 && occ & ((1u64 << 1) | (1u64 << 2) | (1u64 << 3)) == 0;
+        let short_open = rights & WK != 0
+            && b.occupancies[ROOK] & (1u64 << 7) != 0
+            && occ & ((1u64 << 5) | (1u64 << 6)) == 0;
+        let long_open = rights & WQ != 0
+            && b.occupancies[ROOK] & (1u64 << 0) != 0
+            && occ & ((1u64 << 1) | (1u64 << 2) | (1u64 << 3)) == 0;
         if !short_open && !long_open {
             return;
         }
@@ -967,8 +977,12 @@ fn emit_castles<S: MoveSink, const WHITE: bool>(b: &Board, occ: u64, sink: &mut 
         if rights == 0 {
             return;
         }
-        let short_open = rights & BK != 0 && occ & ((1u64 << 61) | (1u64 << 62)) == 0;
-        let long_open = rights & BQ != 0 && occ & ((1u64 << 57) | (1u64 << 58) | (1u64 << 59)) == 0;
+        let short_open = rights & BK != 0
+            && b.occupancies[ROOK] & (1u64 << 63) != 0
+            && occ & ((1u64 << 61) | (1u64 << 62)) == 0;
+        let long_open = rights & BQ != 0
+            && b.occupancies[ROOK] & (1u64 << 56) != 0
+            && occ & ((1u64 << 57) | (1u64 << 58) | (1u64 << 59)) == 0;
         if !short_open && !long_open {
             return;
         }
@@ -1241,6 +1255,13 @@ fn emit_ep<S: MoveSink, const WHITE: bool>(
 ) {
     let ep = ep_sq(b);
     if ep >= 64 {
+        return;
+    }
+    // Rank confinement: genuine EP squares sit on rank 6 (white to move)
+    // or rank 3 (black to move). Anything else is a malformed FEN — it
+    // would underflow `cap_sq` below or mint an unpromoted pawn on the
+    // last rank, so yield no capture rather than a phantom move.
+    if !(8..56).contains(&ep) {
         return;
     }
     let ep_bit = 1u64 << ep;
@@ -2202,6 +2223,29 @@ mod tests {
         list.as_slice()
             .iter()
             .any(|m| m.from() == from && m.to() == to)
+    }
+
+    #[test]
+    fn kingless_rights_yield_no_castles() {
+        // Rights flags with no kings: no phantom castles from empty squares.
+        let (_, list) = legal("8/8/8/8/8/8/8/R5KR w KQ - 0 1");
+        assert!(!has_move(&list, 4, 6) && !has_move(&list, 4, 2));
+        let (_, list) = legal("r5kr/8/8/8/8/8/8/8 b kq - 0 1");
+        assert!(!has_move(&list, 60, 62) && !has_move(&list, 60, 58));
+    }
+
+    #[test]
+    fn rookless_rights_yield_no_castles() {
+        // King home with rights but no rooks: the rook ride is not a move.
+        let (_, list) = legal("4k3/8/8/8/8/8/8/4K3 w KQ - 0 1");
+        assert!(!has_move(&list, 4, 6) && !has_move(&list, 4, 2));
+    }
+
+    #[test]
+    fn off_rank_ep_yields_no_capture() {
+        // Malformed EP square on the last rank: no unpromoted phantom EP.
+        let (_, list) = legal("4k3/1P6/8/8/8/8/8/4K3 w - a8 0 1");
+        assert!(!has_move(&list, 9, 0));
     }
     #[test]
     fn leap_tables_match_oracle() {

@@ -5,15 +5,6 @@
 //! bits1–4 castling rights WK/WQ/BK/BQ, bits5–11 en-passant square
 //! 0–63 / 64 none, bits12–25 halfmove clock); [`render`] inverts it.
 //!
-//! NOTE: `board.rs` §4 tabulates ep at "bits5–10" with halfmove at
-//! "bits11–24", but a 6-bit field cannot hold the `64 = none` sentinel
-//! (`64 << 5` would set halfmove bit 11 and corrupt the clock — parse of
-//! startpos rendered halfmove `1`). The `(6 bits; values 65–127
-//! reserved)` note implies a 7-bit field, so ep is stored in 7 bits at
-//! 5–11 and the 14-bit halfmove clock shifts by one to bits 12–25
-//! (reserved 26–63). Flagged to Main; movegen make/unmake MUST use this
-//! same layout.
-//!
 //! No legality filtering is applied: the ep square is stored (and
 //! rendered) exactly as written, even when no pawn could capture
 //! there — perft move-count identity comes from the stored state, not
@@ -391,7 +382,7 @@ mod tests {
 
     #[test]
     fn kiwipete_round_trip() {
-        let f = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1";
+        let f = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
         assert_eq!(render(&parse(f).expect("kiwipete parses")), f);
     }
 

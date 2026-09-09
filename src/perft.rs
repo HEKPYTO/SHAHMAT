@@ -7,7 +7,7 @@
 //! - [`perft_bulk`] — bulk count at depth 2 (child move-count sums, no
 //!   make/unmake below the horizon); full make/unmake above. Same totals.
 //! - [`perft_tt`] — full make/unmake with a [`Tt`] probe/store at every
-//!   level below the root (transposition cache; identical totals).
+//!   level including the root (transposition cache; identical totals).
 //! - [`divide`] — per-root-move counts in fixed generation order.
 //!
 //! Hot paths (`perft`, `perft_bulk`, [`perft_tt`]) use only stack storage:
@@ -49,9 +49,9 @@ pub fn perft(board: &Board, depth: u32) -> u64 {
     full_mut(&mut b, depth)
 }
 
-/// Bulk perft: identical totals to [`perft`], but depth 2 counts
-/// `sum(generate_legal(child).len)` without make/unmake below the bulk
-/// horizon. Depth 0 = 1, depth 1 = `moves.len()`.
+/// Bulk perft: identical totals to [`perft`], but the fringe counts replies
+/// set-wise (`count_bulk2`, no [`MoveList`], no make/unmake below the bulk
+/// horizon) instead of materialising depth-1 move lists. Depth 0 = 1.
 pub fn perft_bulk(board: &Board, depth: u32) -> u64 {
     assert!(
         depth <= MAX_DEPTH,
@@ -62,9 +62,9 @@ pub fn perft_bulk(board: &Board, depth: u32) -> u64 {
 }
 
 /// TT-cached full make/unmake perft: identical totals to [`perft`], with a
-/// [`Tt`] probe before expansion and a store after (depth ≥ 1 only;
-/// depth 0 = 1 with no table traffic). The table persists across calls, so
-/// repeated runs hit at the root and above.
+/// [`Tt`] probe before expansion (including at the root) and a store after
+/// (depth ≥ 1 only; depth 0 = 1 with no table traffic). The table persists
+/// across calls, so repeated runs hit at the root and above.
 #[inline(never)]
 pub fn perft_tt(board: &Board, depth: u32, tt: &mut Tt) -> u64 {
     assert!(
@@ -85,6 +85,9 @@ pub struct DivideMove {
 }
 
 /// Per-root-move counts at `depth`, in fixed generation order (movegen's
+/// generation order, one row per root move). Depth 0 has no root moves and
+/// returns empty (sums to 0, unlike [`perft`] depth 0 = 1); the CLI rejects
+/// `--divide` at depth 0 rather than printing that.
 pub fn divide(board: &Board, depth: u32) -> Vec<DivideMove> {
     assert!(
         depth <= MAX_DEPTH,

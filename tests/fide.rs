@@ -15,6 +15,18 @@ fn play(g: &mut Game, sans: &[&str]) {
 }
 
 #[test]
+fn mate_beats_coincident_draw_fact() {
+    // Fool's-mate position with the halfmove clock at 150: mate ends the
+    // game immediately, so the seventy-five-move fact must not report a
+    // draw (FIDE mate precedence).
+    let g =
+        Game::from_fen("rnb1kbnr/pppp1ppp/8/4p3/6Pq/5P2/PPPPP2P/RNBQKBNR w KQkq - 150 3").unwrap();
+    assert!(g.is_checkmate());
+    assert!(g.is_game_over());
+    assert!(!g.is_draw());
+}
+
+#[test]
 fn fifty_and_seventy_five_by_clock() {
     let mut g = Game::from_fen("k7/8/8/8/8/8/R7/K7 w - - 100 80").unwrap();
     assert!(g.is_fifty_move_rule());

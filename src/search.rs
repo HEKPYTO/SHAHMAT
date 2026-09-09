@@ -17,7 +17,8 @@
 //!
 //! K1 quiescence at the horizon (depth-0 nodes): stand-pat STM eval,
 //! captures + promotions only (SEE ordered), full-legal evasion while
-//! in check, and a [`MAX_QPLY`] cap falling back to stand-pat. K4 orders
+//! in check, and a [`MAX_QPLY`] cap falling back to alpha (fail-soft;
+//! never a stand-pat score while in check). K4 orders
 //! captures by SEE but never prunes on it (no futility/razoring-style cuts),
 //! and there are no other prunings, no reductions, no aspiration: those are
 //! engine tickets, out of lib scope. This module is the lib-scoped search
@@ -643,6 +644,10 @@ impl SearchTt {
                                 self.usables += 1;
                                 self.cut_upper += 1;
                                 out.score = Some(score);
+                            } else if out.best.is_some() {
+                                // Best-move-only hit: ordered the move but
+                                // proved nothing — usable, not a cutoff.
+                                self.usables += 1;
                             }
                             return out;
                         }
@@ -652,28 +657,42 @@ impl SearchTt {
             }
             i += 1;
         }
+        if out.best.is_some() {
+            // Best-move-only hit across the bucket: usable, not a cutoff.
+            self.usables += 1;
+        }
         out
     }
 
     /// Store a bound for (`key`, `depth`): `score` must already be
-    /// ply-adjusted by the caller. Victim: first unused slot, else the
-    /// shallowest slot. No allocation.
+    /// ply-adjusted by the caller. Victim: the same-key slot if present
+    /// (one key never occupies two slots), else the first unused slot,
+    /// else the shallowest slot. No allocation.
     pub fn store(&mut self, key: u64, depth: u32, flag: u8, score: i32, best: Option<Move>) {
         let bucket = &mut self.buckets[(key as usize) & self.mask];
+        let mut same: Option<usize> = None;
+        let mut free: Option<usize> = None;
         let mut victim = 0usize;
         let mut min_depth = u32::MAX;
         let mut i = 0usize;
         while i < SEARCH_BUCKET {
             if !bucket[i].used {
-                victim = i;
-                break;
-            }
-            if bucket[i].depth < min_depth {
-                min_depth = bucket[i].depth;
-                victim = i;
+                if free.is_none() {
+                    free = Some(i);
+                }
+            } else {
+                if bucket[i].key == key {
+                    same = Some(i);
+                    break;
+                }
+                if bucket[i].depth < min_depth {
+                    min_depth = bucket[i].depth;
+                    victim = i;
+                }
             }
             i += 1;
         }
+        let victim = same.or(free).unwrap_or(victim);
         if bucket[victim].used && bucket[victim].depth > depth {
             self.overwrites_deeper += 1;
         }
@@ -715,15 +734,18 @@ fn unadjust(score: i32, ply: i32) -> i32 {
 // Search proper.
 // ---------------------------------------------------------------------------
 
-/// Per-search counters (negamax entries plus staged-generation cutoffs).
+/// Per-search counters (node entries plus staged-generation cutoffs).
 #[derive(Clone, Copy, Default)]
 pub struct Stats {
-    /// Negamax node entries.
+    /// Node entries (negamax plus quiescence; the root itself is not
+    /// counted, so one row undercounts by exactly one).
     pub nodes: u64,
     /// Beta cutoffs while stage A (TT-first move plus captures/promotions,
-    /// en passant included) was open.
+    /// en passant included) was open. Interior nodes only: quiescence
+    /// cutoffs are not counted.
     pub cuts_a: u64,
     /// Beta cutoffs while stage B (lazily ordered quiets) was open.
+    /// Interior nodes only, like `cuts_a`.
     pub cuts_b: u64,
 }
 
@@ -836,10 +858,11 @@ fn quiescence(
     }
     if check {
         // Evasion: every legal reply, even quiets — standing pat while in
-        // check would score an illegal position. Past the cap, fall back
-        // to the static eval rather than searching forever.
+        // check would score an illegal position. Past the cap, return alpha
+        // (fail-soft: nothing proven, so claim nothing); only exact
+        // terminals score here, so no mate is ever fabricated.
         if qply >= MAX_QPLY {
-            return evaluate(b);
+            return alpha;
         }
         order_moves(b, &mut list);
         let mut best = -INF;
@@ -1021,9 +1044,6 @@ pub fn search_best_tt(
     if let Some(t) = tt.as_deref_mut() {
         let hit = t.probe(board_hash(&b), depth, -INF, INF, 0);
         tt_best = hit.best;
-        if tt_best.is_some() {
-            t.usables += 1;
-        }
     }
     order_moves(&b, &mut list);
     order_tt_best(&mut list, tt_best);
@@ -1102,8 +1122,50 @@ mod tests {
     }
 
     const KIWI: &str = "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1";
+    const CHECK_ESCAPES: &str = "5k2/8/8/8/8/8/5R2/6K1 b - - 0 1";
     const SCHOLARS: &str = "r1bqkb1r/pppp1ppp/2n2n2/4p2Q/2B1P3/8/PPPP1PPP/RNBQK1NR w KQkq - 4 4";
     const STALEMATE: &str = "k7/8/1Q6/8/8/8/8/K7 b - - 0 1";
+
+    /// Past the cap the horizon claims nothing: alpha in check (never an
+    /// illegal stand-pat) and the alpha-raised stand-pat when quiet.
+    #[test]
+    fn qs_cap_falls_back_to_alpha() {
+        let mut b = pos(CHECK_ESCAPES);
+        let mut stats = Stats::default();
+        assert!(is_in_check(&b, false));
+        assert_eq!(quiescence(&mut b, 0, 100, 0, MAX_QPLY, &mut stats), 0);
+        let mut s = pos(fen::STARTPOS);
+        let mut stats = Stats::default();
+        assert_eq!(quiescence(&mut s, -10, 10, 0, MAX_QPLY, &mut stats), 0);
+    }
+
+    /// TT flag edges at the probe: EXACT cuts, LOWER below beta narrows,
+    /// UPPER above alpha yields best-only (counted usable, not a cutoff),
+    /// and same-key stores overwrite instead of duplicating slots.
+    #[test]
+    fn tt_flag_edges_and_usables() {
+        let mut tt = SearchTt::new(1);
+        let key = board_hash(&pos(KIWI));
+        tt.store(key, 3, FLAG_EXACT, 42, None);
+        let p = tt.probe(key, 2, 0, 100, 0);
+        assert_eq!(p.score, Some(42));
+        assert_eq!(tt.usables, 1);
+        tt.store(key, 3, FLAG_LOWER, 30, None);
+        let p = tt.probe(key, 2, 0, 100, 0);
+        assert_eq!(p.score, None);
+        assert_eq!(p.alpha, 30);
+        assert_eq!(tt.usables, 1);
+        let mv = Move::new(12, 28, 0, 0);
+        tt.store(key, 3, FLAG_UPPER, 200, Some(mv));
+        let p = tt.probe(key, 2, 0, 100, 0);
+        assert_eq!(p.score, None);
+        assert_eq!(p.best, Some(mv));
+        assert_eq!(tt.usables, 2);
+        tt.store(key, 3, FLAG_EXACT, 43, None);
+        let p = tt.probe(key, 2, 0, 100, 0);
+        assert_eq!(p.score, Some(43));
+        assert_eq!(tt.usables, 3);
+    }
 
     /// Same-depth scores and best moves are bit-identical with the table
     /// on or off; mates stay mate-range under the table (ply-adjust check).

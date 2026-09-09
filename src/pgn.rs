@@ -201,12 +201,13 @@ fn split_games(src: &str) -> Result<Vec<RawGame>, PgnError> {
     let mut text = String::new();
     let mut has_tags = false;
     let mut has_text = false;
+    let mut braces = 0usize;
     for line in src.lines() {
         let t = line.trim();
         if t.is_empty() {
             continue;
         }
-        if t.starts_with('[') {
+        if t.starts_with('[') && braces == 0 {
             if has_text {
                 games.push(RawGame {
                     tags: core::mem::take(&mut tags),
@@ -217,9 +218,22 @@ fn split_games(src: &str) -> Result<Vec<RawGame>, PgnError> {
             tags.push(parse_tag(games.len() + 1, t)?);
             has_tags = true;
         } else {
-            let code = match line.find(';') {
-                Some(i) => &line[..i],
-                None => line,
+            // Strip `{...}` comment spans (nesting tracked across lines)
+            // before deciding the line carries game text: a comment-only
+            // file yields no games, and a `[` inside a comment never
+            // splits.
+            let mut code = String::with_capacity(line.len());
+            for ch in line.chars() {
+                match ch {
+                    '{' => braces += 1,
+                    '}' => braces = braces.saturating_sub(1),
+                    _ if braces == 0 => code.push(ch),
+                    _ => {}
+                }
+            }
+            let code = match code.find(';') {
+                Some(i) => code[..i].trim().to_string(),
+                None => code.trim().to_string(),
             };
             let code = code.trim();
             if code.is_empty() {
@@ -520,6 +534,23 @@ pub(crate) fn resolve_san(board: &Board, san: &ParsedSan, list: &[Move]) -> Resu
 mod tests {
     use super::*;
     use crate::fen::render;
+
+    #[test]
+    fn comment_only_file_yields_no_games() {
+        assert!(load_pgn("{just a comment}\n{another}\n")
+            .unwrap()
+            .is_empty());
+        assert!(load_pgn("; line comment only\n").unwrap().is_empty());
+        assert!(load_pgn("").unwrap().is_empty());
+    }
+
+    #[test]
+    fn bracket_inside_comment_never_splits() {
+        let src = "{ [Notatag \"x\"] }\n[Event \"E\"]\n\n1. e4 e5 *\n";
+        let games = load_pgn(src).expect("loads");
+        assert_eq!(games.len(), 1);
+        assert_eq!(games[0].moves.len(), 2);
+    }
 
     #[test]
     fn pgn_scholars_mate() {

@@ -95,7 +95,9 @@ enum Mode {
 
 fn main() -> ExitCode {
     let args: Vec<String> = env::args().skip(1).collect();
-    if args.iter().any(|a| a == "--health-check") {
+    // Sole-command only: a stray `--health-check` anywhere else must not
+    // mask a real command (or its errors) with `ok`.
+    if args.len() == 1 && args[0] == "--health-check" {
         println!("ok");
         return ExitCode::from(0);
     }
@@ -236,6 +238,13 @@ fn count_root_split(board: &Board, depth: u32, jobs: usize, mode: Mode) -> (u64,
     // worker. Striding spreads them; the join order stays fixed, so totals
     // remain deterministic.
     let workers = jobs.min(tasks.len());
+    // Split the TT budget across workers: one full table per chunk would
+    // multiply the allocation by the worker count (up to ~1 TiB at max
+    // flags). Table size only affects hit rate, never exactness.
+    let mode = match mode {
+        Mode::Tt(mb) => Mode::Tt((mb / workers).max(1)),
+        m => m,
+    };
     let mut total = 0u64;
     let (mut probes, mut hits) = (0u64, 0u64);
     std::thread::scope(|s| {

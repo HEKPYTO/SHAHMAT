@@ -489,12 +489,15 @@ impl Game {
 
     /// Drawn game: stalemate or any automatic FIDE draw (same set as
     /// [`Game::is_game_over`] minus checkmate). Claimable draws excluded.
+    /// Mate ends the game immediately, so a coincident automatic-draw fact
+    /// (e.g. mate delivered on halfmove 150) never reports a draw.
     pub fn is_draw(&self) -> bool {
-        self.is_stalemate()
-            || (self.adjudicate
-                && (self.is_seventy_five_move_rule()
-                    || self.is_fivefold_repetition()
-                    || self.is_dead_position()))
+        !self.is_checkmate()
+            && (self.is_stalemate()
+                || (self.adjudicate
+                    && (self.is_seventy_five_move_rule()
+                        || self.is_fivefold_repetition()
+                        || self.is_dead_position())))
     }
 
     /// Halfmove clock (plies since last pawn move or capture).
