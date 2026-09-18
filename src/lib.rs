@@ -46,6 +46,5 @@ pub mod movegen;
 pub mod nif;
 pub mod perft;
 pub mod pgn;
-pub mod search;
 
 pub use board::{Board, Move, StateInfo};

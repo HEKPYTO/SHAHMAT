@@ -29,10 +29,6 @@
 //!    captures file-1 then file+1 (promos N, B, R, Q each), then EP.
 //! 2. knights, 3. bishops, 4. rooks, 5. queens, 6. king, 7. castling (K then Q).
 //!
-//! Staged captures-first search can wrap this later (the `Move` layout
-//! already carries everything a staged picker needs); the exact path
-//! below never reorders.
-//!
 //! ## Fully-legal core (no make/unmake in the legality path)
 //!
 //! One generic generator (`generate_moves_into`) feeds a [`MoveSink`]:
@@ -988,9 +984,6 @@ fn generate_moves_into<S: MoveSink, const WHITE: bool>(b: &Board, sink: &mut S) 
             return;
         }
     }
-    if sink.done() {
-        return;
-    }
     if n == 0 {
         emit_castles::<_, WHITE>(b, occ, sink);
     }
@@ -1221,14 +1214,10 @@ fn emit_pawn_moves<S: MoveSink, const WHITE: bool>(
     let dbl_targets = dbl_nomask & check_mask;
     let single = single_raw & check_mask;
     let (single_np, single_pr) = (single & !promo_rank, single & promo_rank);
-    let (cap_l_np, cap_l_pr) = (
-        cap_l & check_mask & !promo_rank,
-        cap_l & check_mask & promo_rank,
-    );
-    let (cap_r_np, cap_r_pr) = (
-        cap_r & check_mask & !promo_rank,
-        cap_r & check_mask & promo_rank,
-    );
+    let cap_lm = cap_l & check_mask;
+    let cap_rm = cap_r & check_mask;
+    let (cap_l_np, cap_l_pr) = (cap_lm & !promo_rank, cap_lm & promo_rank);
+    let (cap_r_np, cap_r_pr) = (cap_rm & !promo_rank, cap_rm & promo_rank);
     if pinned == 0 {
         sink.push_pawn_moves(single_np, push);
         sink.push_pawn_promos(single_pr, push);

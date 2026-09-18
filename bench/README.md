@@ -1,37 +1,35 @@
 # bench
 
-Two POSIX-`sh` harnesses, zero dependencies beyond docker + cargo + awk.
+Two POSIX-`sh` harnesses, zero dependencies beyond cargo + awk.
 No python, no jq, no frameworks.
 
 | Script | Does | Run when |
 | --- | --- | --- |
-| `bench.sh [image]` | Builds the image, times startpos d6 / kiwi d5 / pos4 d5 in-image (warmup + median of 5, nodes-gated), writes `outputs/bench-<utc-ts>.json` + table on stdout | Measuring speed |
 | `gate.sh [binary]` | Checks 15 exact perft counts + 2 `--no-bulk` cross-checks + divide-row self-consistency against any `shahmat-svc` binary (default `./target/release/shahmat-svc`), exit 0/1 | Proving correctness |
-| `searchbench.sh [--gate] [binary]` | Search-representative matrix (8 entries, mid/endgame heavy) across bulk / tt16 / nobulk modes, every cell node gated, default times warmup plus median of 5 into `outputs/searchbench-<utc-ts>.json` | Timing search-like mix |
-| `searchbench-v2.sh [--gate] [binary]` | Same gated 8x3 matrix (same `--gate` semantics, JSON into `outputs/searchbench-v2-<utc-ts>.json`) plus the frozen search-path score: nobulk kiwi-d5+p6-d5+p5-d5 medians (~91% of nobulk time) with its share, and the tt16 top-3. Still perft-driven — TT cells do not port to real search | Scoring the search path, not tuning it |
-| `searchbench-search.sh [--gate] [binary]` | Frozen fixed-depth search matrix (4 positions + 4 mates, tt16): mates must return exact best move with mate-range score, every cell bit-identical across two runs (deterministic search), default times warmup plus median of 5 into `outputs/searchbench-search-<utc-ts>.json` | Gating the search substrate |
+| `bench.sh [--gate] [binary]` | Movegen perft matrix (8 entries, mid/endgame heavy) across bulk / tt16 / nobulk modes, every cell node gated, default times warmup plus median of 5 into `outputs/bench-<utc-ts>.json` | Timing movegen mix |
+| `vs.sh [--gate]` | Rival shootout on 3 cells (sp-d5, sp-d6, kiwi-d5): shahmat modes plus shakmaty/cozy/chess/pleco via `$SHAKGATE` harness plus Stockfish, every cell node gated, median of 5 into `outputs/vs-<utc-ts>.json`. Rivals never vendored; absent binaries are skipped | Proving no regression vs others |
 
 ## Porting to another project
 
 Both scripts split CONFIG (top, project-specific) from engine (bottom).
-Copy the file, replace only CONFIG: the image name + `MATRIX` lines
-(`name|fen|depth|expected-nodes`) in `bench.sh`, the `chk` data lines
-(`chk ["flags"] <fen-var> <depth> <expected> <label>`) in `gate.sh`. The
-engine fits services with stable `<label>: <value>` stdout markers —
-adapt entrypoint/verb/markers (here `/svc`, `perft`, `nodes/time/nps`).
-The median/gate/JSON logic ports untouched.
+Copy the file, replace only CONFIG: the `chk` data lines
+(`chk ["flags"] <fen-var> <depth> <expected> <label>`) in `gate.sh`,
+the `MATRIX` lines (`name|fen|depth|expected-nodes`) in `bench.sh`.
+The engine fits services with stable `<label>: <value>` stdout markers —
+adapt the verb/markers (here `perft`, `nodes/time/nps`).
 
 ```sh
-./bench/bench.sh                    # default image shahmat-svc:bench
-IMAGE=my-reg/shahmat:test ./bench/bench.sh   # override, or pass as $1
-./bench/searchbench.sh [--gate]     # gate exactness only, default also times and writes JSON
+cargo build --locked --release --bin shahmat-svc
+./bench/gate.sh                        # default binary path above
+./bench/gate.sh /tmp/other-svc        # any binary, same 17 checks
+echo $?                                # 0 = all exact
+./bench/bench.sh [--gate]     # gate exactness only, default also times and writes JSON
 ```
 
 Rules (or the numbers mean nothing):
 
 1. **Build the exact binary first.** `cargo build --release` alone may reuse
-   a stale target — check the timestamp. For the image, `docker build` always
-   rebuilds what changed.
+   a stale target — check the timestamp.
 2. **Single thread, no `--divide`.** `--jobs N` measures throughput (wall
    clock), `--divide` is a correctness surface — neither is an nps number.
 3. **Warmup out, median of 5+.** First run discarded, median of the rest.
@@ -45,15 +43,9 @@ Rules (or the numbers mean nothing):
 
 ## Report schema (`outputs/bench-<ts>.json`)
 
-```json
-{"image": "shahmat-svc:bench", "date": "<utc-ts>",
- "runs": [{"pos": "startpos", "depth": 6, "nodes": 119060324,
-           "secs": "<measured>", "nps": "<measured>"}]}
-```
-
-`nodes` is the exact perft count. `secs`/`nps` are measured on the
-run host and vary by machine — values omitted here. They are parsed
-from the svc's own `nodes:`/`time:`/`nps:` lines with awk — no schema to drift.
+Per-entry `nodes` is the exact perft count. `secs`/`nps` are measured on the
+run host and vary by machine. They are parsed from the svc's own
+`nodes:`/`time:`/`nps:` lines with awk — no schema to drift.
 
 ## Gating properly
 
@@ -66,19 +58,3 @@ echo $?                                # 0 = all exact
 
 Slow KEEP-grade counts (run once per kept change, not per probe):
 startpos d7 = 3195901860, Kiwipete d6 = 8031647685.
-
-## Fast build (PGO, local-only)
-
-Profiles are never committed (arch rot) — retrain per machine.
-Docker trains per arch on every build; for host timing:
-
-```sh
-RUSTFLAGS="-Cprofile-generate=/tmp/pgo" cargo build --release --bin shahmat-svc
-LLVM_PROFILE_FILE=/tmp/pgo/sp.profraw ./target/release/shahmat-svc perft startpos 6 >/dev/null
-LLVM_PROFILE_FILE=/tmp/pgo/kiwi.profraw ./target/release/shahmat-svc perft "r3k2r/p1ppqpb1/bn2pnp1/3PN3/1p2P3/2N2Q1p/PPPBBPPP/R3K2R w KQkq - 0 1" 5 >/dev/null
-llvm-profdata merge -o /tmp/pgo.profdata /tmp/pgo/
-RUSTFLAGS="-Cprofile-use=/tmp/pgo.profdata" cargo build --release --bin shahmat-svc
-```
-
-(One profraw per run — same-binary `%m` patterns collide and silently
-keep only the last run.)
