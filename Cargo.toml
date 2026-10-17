@@ -15,7 +15,7 @@ name = "shahmat"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-rustler = { version = "0.38", optional = true }
+rustler = { version = "0.39", optional = true }
 
 [features]
 default = ["magic-black"]
