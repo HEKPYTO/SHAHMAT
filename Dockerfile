@@ -1,6 +1,6 @@
 # Builder tracks the stable Rust minor branch (no SHA pin: upstream base
 # fixes must flow in; pin counterpart kept in CI provenance/SBOM instead).
-FROM rust:1.98-slim-trixie AS build
+FROM rust:1.99-slim-trixie AS build
 WORKDIR /app
 ARG TARGETARCH
 ARG RUSTFLAGS=""
